@@ -1,0 +1,38 @@
+# Python
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+news_monitor/venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# App data & models (download / generate locally)
+news_monitor/data/*.db
+news_monitor/data/screenshots/
+news_monitor/data/audio/
+news_monitor/logs/
+**/.DS_Store
+*.pth
+*.pt
+*.ckpt
+
+# Node / Next.js
+node_modules/
+news_monitor/frontend/node_modules/
+news_monitor/frontend/.next/
+news_monitor/frontend/out/
+news_monitor/frontend/.env*.local
+
+# OS & IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
+
+# Cursor uploads
+uploads/

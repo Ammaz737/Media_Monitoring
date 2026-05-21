@@ -1,0 +1,45 @@
+# Core dependencies
+torch
+torchvision
+torchaudio
+numpy
+opencv-python
+pillow
+
+# Web framework
+flask
+flask-socketio
+python-socketio
+python-engineio
+
+# Audio processing and transcription
+openai-whisper
+transformers
+librosa
+soundfile
+
+# Stream sources (YouTube live / VOD from dashboard URL)
+yt-dlp
+
+# Utilities
+requests
+python-dateutil
+pytz
+uuid
+
+# Optional: for better Urdu text processing
+arabic-reshaper
+python-bidi
+
+# Development and testing
+pytest
+black
+flake8
+
+# Additional CV dependencies
+scikit-image
+matplotlib
+
+# For production deployment
+gunicorn
+eventlet

@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="en" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>News Monitor Dashboard</title>
+    
+    <!-- Bootstrap CSS -->
+    <link href="{{ url_for('static', filename='css/bootstrap.min.css') }}" rel="stylesheet">
+    <!-- RTL Support -->
+    <link href="{{ url_for('static', filename='css/bootstrap.rtl.min.css') }}" rel="stylesheet">
+    <!-- Chart.js -->
+    <script src="{{ url_for('static', filename='js/chart.js') }}"></script>
+    <!-- Socket.IO -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.4/socket.io.js"></script>
+    
+    <style>
+        .urdu-text {
+            font-family: 'Noto Nastaliq Urdu', 'Jameel Noori Nastaleeq', serif;
+            font-size: 1.1em;
+            line-height: 1.8;
+        }
+        
+        .status-badge {
+            font-size: 0.8em;
+        }
+        
+        .card-header {
+            background: linear-gradient(45deg, #007bff, #0056b3);
+            color: white;
+        }
+        
+        .alert-high { border-left: 4px solid #dc3545; }
+        .alert-medium { border-left: 4px solid #ffc107; }
+        .alert-low { border-left: 4px solid #28a745; }
+        
+        .extraction-item {
+            border-left: 3px solid #007bff;
+            padding: 10px;
+            margin-bottom: 10px;
+            background: #f8f9fa;
+        }
+        
+        .transcription-item {
+            border-left: 3px solid #28a745;
+            padding: 10px;
+            margin-bottom: 10px;
+            background: #f8f9fa;
+        }
+        
+        .nav-pills .nav-link.active {
+            background-color: #007bff;
+        }
+        
+        .stats-card {
+            transition: transform 0.2s;
+        }
+        
+        .stats-card:hover {
+            transform: translateY(-2px);
+        }
+        
+        .monitor-controls {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            z-index: 1000;
+        }
+        
+        .real-time-indicator {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            z-index: 1001;
+        }
+        
+        .text-truncate-3 {
+            display: -webkit-box;
+            -webkit-line-clamp: 3;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+    </style>
+</head>
+<body>
+    <!-- Real-time connection indicator -->
+    <div class="real-time-indicator">
+        <span class="badge bg-secondary" id="connection-status">
+            <span class="spinner-border spinner-border-sm" role="status"></span>
+            اتصال...
+        </span>
+    </div>
+
+    <!-- Navigation -->
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="/">
+                <strong>📺 News Monitor</strong>
+            </a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav me-auto">
+                    <li class="nav-item">
+                        <a class="nav-link active" href="/">Dashboard</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/search">Search</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/alerts">Alerts</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/settings">Settings</a>
+                    </li>
+                </ul>
+                <span class="navbar-text" id="monitor-status">
+                    <span class="badge bg-secondary">غیر فعال</span>
+                </span>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container-fluid mt-4">
+        <!-- Statistics Cards -->
+        <div class="row mb-4">
+            <div class="col-lg-3 col-md-6 mb-3">
+                <div class="card stats-card h-100">
+                    <div class="card-header">
+                        <h6 class="mb-0">📄 Text Extractions</h6>
+                    </div>
+                    <div class="card-body text-center">
+                        <h3 class="text-primary" id="total-extractions">-</h3>
+                        <small class="text-muted">Total extractions</small>
+                        <div class="mt-2">
+                            <small class="text-success" id="recent-extractions">0 in last 24h</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="col-lg-3 col-md-6 mb-3">
+                <div class="card stats-card h-100">
+                    <div class="card-header">
+                        <h6 class="mb-0">🎵 Audio Transcriptions</h6>
+                    </div>
+                    <div class="card-body text-center">
+                        <h3 class="text-success" id="total-transcriptions">-</h3>
+                        <small class="text-muted">Total transcriptions</small>
+                        <div class="mt-2">
+                            <small class="text-success" id="recent-transcriptions">0 in last 24h</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="col-lg-3 col-md-6 mb-3">
+                <div class="card stats-card h-100">
+                    <div class="card-header">
+                        <h6 class="mb-0">🚨 Alerts</h6>
+                    </div>
+                    <div class="card-body text-center">
+                        <h3 class="text-warning" id="total-alerts">-</h3>
+                        <small class="text-muted">Total alerts</small>
+                        <div class="mt-2">
+                            <small class="text-danger" id="unread-alerts">0 unread</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="col-lg-3 col-md-6 mb-3">
+                <div class="card stats-card h-100">
+                    <div class="card-header">
+                        <h6 class="mb-0">⚡ Performance</h6>
+                    </div>
+                    <div class="card-body text-center">
+                        <h3 class="text-info" id="processing-rate">-</h3>
+                        <small class="text-muted">Extractions/min</small>
+                        <div class="mt-2">
+                            <small class="text-info" id="frame-rate">0 FPS</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Content -->
+        <div class="row">
+            <!-- Recent Activity -->
+            <div class="col-lg-8">
+                <div class="card">
+                    <div class="card-header">
+                        <ul class="nav nav-pills card-header-pills" id="activity-tabs" role="tablist">
+                            <li class="nav-item">
+                                <a class="nav-link active" id="extractions-tab" data-bs-toggle="pill" href="#extractions-pane">
+                                    Text Extractions
+                                </a>
+                            </li>
+                            <li class="nav-item">
+                                <a class="nav-link" id="transcriptions-tab" data-bs-toggle="pill" href="#transcriptions-pane">
+                                    Audio Transcriptions
+                                </a>
+                            </li>
+                            <li class="nav-item">
+                                <a class="nav-link" id="alerts-tab" data-bs-toggle="pill" href="#alerts-pane">
+                                    Recent Alerts
+                                </a>
+                            </li>
+                        </ul>
+                    </div>
+                    <div class="card-body">
+                        <div class="tab-content" id="activity-content">
+                            <!-- Text Extractions -->
+                            <div class="tab-pane fade show active" id="extractions-pane">
+                                <div id="extractions-list">
+                                    <div class="text-center text-muted">
+                                        <div class="spinner-border" role="status">
+                                            <span class="visually-hidden">Loading...</span>
+                                        </div>
+                                        <p class="mt-2">Loading extractions...</p>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- Audio Transcriptions -->
+                            <div class="tab-pane fade" id="transcriptions-pane">
+                                <div id="transcriptions-list">
+                                    <div class="text-center text-muted">
+                                        <div class="spinner-border" role="status">
+                                            <span class="visually-hidden">Loading...</span>
+                                        </div>
+                                        <p class="mt-2">Loading transcriptions...</p>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- Recent Alerts -->
+                            <div class="tab-pane fade" id="alerts-pane">
+                                <div id="alerts-list">
+                                    <div class="text-center text-muted">
+                                        <div class="spinner-border" role="status">
+                                            <span class="visually-hidden">Loading...</span>
+                                        </div>
+                                        <p class="mt-2">Loading alerts...</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Live Stats Chart -->
+            <div class="col-lg-4">
+                <div class="card">
+                    <div class="card-header">
+                        <h6 class="mb-0">📊 Live Activity Chart</h6>
+                    </div>
+                    <div class="card-body">
+                        <canvas id="activity-chart" height="300"></canvas>
+                    </div>
+                </div>
+                
+                <!-- System Status -->
+                <div class="card mt-3">
+                    <div class="card-header">
+                        <h6 class="mb-0">🖥️ System Status</h6>
+                    </div>
+                    <div class="card-body">
+                        <div class="row text-center">
+                            <div class="col-6">
+                                <div class="border-end">
+                                    <h5 class="text-primary" id="runtime">00:00:00</h5>
+                                    <small class="text-muted">Runtime</small>
+                                </div>
+                            </div>
+                            <div class="col-6">
+                                <h5 class="text-success" id="queue-size">0</h5>
+                                <small class="text-muted">Queue Size</small>
+                            </div>
+                        </div>
+                        
+                        <hr>
+                        
+                        <div class="d-grid gap-2">
+                            <button class="btn btn-success btn-sm" id="start-btn" onclick="startMonitoring()">
+                                ▶️ Start Monitoring
+                            </button>
+                            <button class="btn btn-danger btn-sm" id="stop-btn" onclick="stopMonitoring()" disabled>
+                                ⏹️ Stop Monitoring
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+
+    <script>
+        // Initialize WebSocket connection
+        const socket = io();
+        
+        let activityChart;
+        let chartData = {
+            labels: [],
+            extractions: [],
+            transcriptions: []
+        };
+        
+        // Initialize chart
+        function initChart() {
+            const ctx = document.getElementById('activity-chart').getContext('2d');
+            activityChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        {
+                            label: 'Text Extractions',
+                            data: [],
+                            borderColor: '#007bff',
+                            backgroundColor: 'rgba(0, 123, 255, 0.1)',
+                            tension: 0.1
+                        },
+                        {
+                            label: 'Audio Transcriptions', 
+                            data: [],
+                            borderColor: '#28a745',
+                            backgroundColor: 'rgba(40, 167, 69, 0.1)',
+                            tension: 0.1
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            position: 'bottom'
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Socket event handlers
+        socket.on('connected', function(data) {
+            updateConnectionStatus(true);
+            socket.emit('subscribe_updates', {});
+        });
+        
+        socket.on('disconnect', function() {
+            updateConnectionStatus(false);
+        });
+        
+        socket.on('real_time_update', function(data) {
+            updateDashboard(data);
+        });
+        
+        function updateConnectionStatus(connected) {
+            const statusElement = document.getElementById('connection-status');
+            if (connected) {
+                statusElement.className = 'badge bg-success';
+                statusElement.innerHTML = '🟢 متصل';
+            } else {
+                statusElement.className = 'badge bg-danger';
+                statusElement.innerHTML = '🔴 منقطع';
+            }
+        }
+        
+        function updateDashboard(data) {
+            // Update statistics
+            if (data.statistics && data.statistics.database) {
+                const dbStats = data.statistics.database;
+                document.getElementById('total-extractions').textContent = dbStats.totals.text_extractions || 0;
+                document.getElementById('total-transcriptions').textContent = dbStats.totals.audio_transcriptions || 0;
+                document.getElementById('total-alerts').textContent = dbStats.totals.alerts || 0;
+                document.getElementById('unread-alerts').textContent = `${dbStats.totals.unread_alerts || 0} unread`;
+                
+                document.getElementById('recent-extractions').textContent = `${dbStats.recent_activity.text_extractions_24h || 0} in last 24h`;
+                document.getElementById('recent-transcriptions').textContent = `${dbStats.recent_activity.audio_transcriptions_24h || 0} in last 24h`;
+            }
+            
+            if (data.statistics && data.statistics.monitor) {
+                const monStats = data.statistics.monitor;
+                document.getElementById('processing-rate').textContent = (monStats.extractions_per_minute || 0).toFixed(1);
+                document.getElementById('frame-rate').textContent = `${(monStats.frames_per_second || 0).toFixed(1)} FPS`;
+                
+                // Update runtime
+                if (monStats.runtime_seconds) {
+                    const runtime = formatRuntime(monStats.runtime_seconds);
+                    document.getElementById('runtime').textContent = runtime;
+                }
+                
+                // Update queue size
+                if (monStats.queue_sizes) {
+                    const totalQueue = (monStats.queue_sizes.frames || 0) + (monStats.queue_sizes.audio || 0);
+                    document.getElementById('queue-size').textContent = totalQueue;
+                }
+                
+                // Update monitor status
+                updateMonitorStatus(monStats.is_running);
+            }
+            
+            // Update lists
+            if (data.recent_extractions) {
+                updateExtractionsList(data.recent_extractions);
+            }
+            
+            if (data.recent_transcriptions) {
+                updateTranscriptionsList(data.recent_transcriptions);
+            }
+            
+            if (data.recent_alerts) {
+                updateAlertsList(data.recent_alerts);
+            }
+            
+            // Update chart
+            updateChart(data);
+        }
+        
+        function updateExtractionsList(extractions) {
+            const container = document.getElementById('extractions-list');
+            
+            if (extractions.length === 0) {
+                container.innerHTML = '<div class="text-center text-muted">No recent extractions</div>';
+                return;
+            }
+            
+            let html = '';
+            extractions.forEach(item => {
+                const timeStr = new Date(item.timestamp).toLocaleString('ur-PK');
+                const confidence = (item.confidence * 100).toFixed(1);
+                
+                html += `
+                    <div class="extraction-item">
+                        <div class="d-flex justify-content-between align-items-start mb-2">
+                            <span class="badge bg-primary">${item.region_name}</span>
+                            <small class="text-muted">${timeStr}</small>
+                        </div>
+                        <div class="urdu-text text-truncate-3">${item.extracted_text}</div>
+                        <div class="mt-2">
+                            <small class="text-muted">
+                                Confidence: ${confidence}% | 
+                                Priority: ${item.priority} |
+                                Channel: ${item.channel_name}
+                            </small>
+                        </div>
+                    </div>
+                `;
+            });
+            
+            container.innerHTML = html;
+        }
+        
+        function updateTranscriptionsList(transcriptions) {
+            const container = document.getElementById('transcriptions-list');
+            
+            if (transcriptions.length === 0) {
+                container.innerHTML = '<div class="text-center text-muted">No recent transcriptions</div>';
+                return;
+            }
+            
+            let html = '';
+            transcriptions.forEach(item => {
+                const timeStr = new Date(item.timestamp).toLocaleString('ur-PK');
+                const confidence = (item.confidence * 100).toFixed(1);
+                const duration = item.duration.toFixed(1);
+                
+                html += `
+                    <div class="transcription-item">
+                        <div class="d-flex justify-content-between align-items-start mb-2">
+                            <span class="badge bg-success">Audio</span>
+                            <small class="text-muted">${timeStr}</small>
+                        </div>
+                        <div class="urdu-text text-truncate-3">${item.transcribed_text}</div>
+                        <div class="mt-2">
+                            <small class="text-muted">
+                                Confidence: ${confidence}% | 
+                                Duration: ${duration}s |
+                                Channel: ${item.channel_name}
+                            </small>
+                        </div>
+                    </div>
+                `;
+            });
+            
+            container.innerHTML = html;
+        }
+        
+        function updateAlertsList(alerts) {
+            const container = document.getElementById('alerts-list');
+            
+            if (alerts.length === 0) {
+                container.innerHTML = '<div class="text-center text-muted">No recent alerts</div>';
+                return;
+            }
+            
+            let html = '';
+            alerts.forEach(item => {
+                const timeStr = new Date(item.timestamp).toLocaleString('ur-PK');
+                const keywords = JSON.parse(item.matched_keywords || '[]').join(', ');
+                
+                html += `
+                    <div class="alert alert-${item.severity} alert-dismissible fade show">
+                        <div class="d-flex justify-content-between align-items-start">
+                            <div class="flex-grow-1">
+                                <strong>Keywords:</strong> ${keywords}
+                                <div class="urdu-text mt-1 text-truncate-3">${item.alert_text}</div>
+                                <small class="text-muted">${timeStr}</small>
+                            </div>
+                            <button type="button" class="btn-close" onclick="markAlertRead('${item.uuid}')"></button>
+                        </div>
+                    </div>
+                `;
+            });
+            
+            container.innerHTML = html;
+        }
+        
+        function updateChart(data) {
+            if (!activityChart) return;
+            
+            const now = new Date().toLocaleTimeString();
+            const extractionsCount = data.recent_extractions ? data.recent_extractions.length : 0;
+            const transcriptionsCount = data.recent_transcriptions ? data.recent_transcriptions.length : 0;
+            
+            // Keep only last 20 data points
+            if (chartData.labels.length >= 20) {
+                chartData.labels.shift();
+                chartData.extractions.shift();
+                chartData.transcriptions.shift();
+            }
+            
+            chartData.labels.push(now);
+            chartData.extractions.push(extractionsCount);
+            chartData.transcriptions.push(transcriptionsCount);
+            
+            activityChart.data.labels = chartData.labels;
+            activityChart.data.datasets[0].data = chartData.extractions;
+            activityChart.data.datasets[1].data = chartData.transcriptions;
+            activityChart.update('none');
+        }
+        
+        function updateMonitorStatus(isRunning) {
+            const statusElement = document.getElementById('monitor-status');
+            const startBtn = document.getElementById('start-btn');
+            const stopBtn = document.getElementById('stop-btn');
+            
+            if (isRunning) {
+                statusElement.innerHTML = '<span class="badge bg-success">فعال</span>';
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+            } else {
+                statusElement.innerHTML = '<span class="badge bg-secondary">غیر فعال</span>';
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
+            }
+        }
+        
+        function formatRuntime(seconds) {
+            const hours = Math.floor(seconds / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            const secs = Math.floor(seconds % 60);
+            
+            return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+        }
+        
+        function startMonitoring() {
+            fetch('/api/monitor/start', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    rtsp_url: 'rtsp://admin:gcs12345@192.168.2.145:554/Streaming/Channels/101',
+                    channel_name: 'news_channel'
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    updateMonitorStatus(true);
+                } else {
+                    alert('خرابی: ' + data.error);
+                }
+            })
+            .catch(error => {
+                console.error('Error starting monitor:', error);
+                alert('خرابی: ' + error.message);
+            });
+        }
+        
+        function stopMonitoring() {
+            fetch('/api/monitor/stop', {
+                method: 'POST'
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    updateMonitorStatus(false);
+                } else {
+                    alert('خرابی: ' + data.error);
+                }
+            })
+            .catch(error => {
+                console.error('Error stopping monitor:', error);
+                alert('خرابی: ' + error.message);
+            });
+        }
+        
+        function markAlertRead(uuid) {
+            fetch(`/api/alerts/${uuid}/mark-read`, {
+                method: 'POST'
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    // Remove alert from display
+                    location.reload();
+                }
+            });
+        }
+        
+        // Initialize everything
+        document.addEventListener('DOMContentLoaded', function() {
+            initChart();
+            
+            // Load initial data
+            loadStatistics();
+            loadRecentData();
+            
+            // Set up periodic refresh (fallback for when WebSocket isn't working)
+            setInterval(() => {
+                loadStatistics();
+                loadRecentData();
+            }, 30000);
+        });
+        
+        function loadStatistics() {
+            fetch('/api/statistics')
+                .then(response => response.json())
+                .then(data => {
+                    updateDashboard({ statistics: data });
+                });
+        }
+        
+        function loadRecentData() {
+            Promise.all([
+                fetch('/api/recent-extractions?limit=10').then(r => r.json()),
+                fetch('/api/recent-transcriptions?limit=10').then(r => r.json()),
+                fetch('/api/alerts?is_read=false&limit=5').then(r => r.json())
+            ])
+            .then(([extractions, transcriptions, alerts]) => {
+                updateDashboard({
+                    recent_extractions: extractions.extractions,
+                    recent_transcriptions: transcriptions.transcriptions,
+                    recent_alerts: alerts.alerts
+                });
+            });
+        }
+    </script>
+</body>
+</html>
