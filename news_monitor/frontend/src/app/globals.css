@@ -1,0 +1,220 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 210 40% 98%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --primary: 224 76% 40%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 210 40% 96%;
+    --secondary-foreground: 215 16% 47%;
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 47%;
+    --accent: 210 40% 96%;
+    --accent-foreground: 222 47% 11%;
+    --destructive: 347 77% 50%;
+    --destructive-foreground: 0 0% 100%;
+    --success: 160 84% 30%;
+    --warning: 32 95% 44%;
+    --border: 214 32% 91%;
+    --input: 214 32% 91%;
+    --ring: 224 76% 40%;
+    --radius: 1rem;
+    --page: 210 40% 98%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border transition-colors duration-150 ease-out;
+  }
+  body {
+    @apply bg-page text-foreground antialiased;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+@layer components {
+  .premium-card {
+    @apply rounded-2xl border border-slate-200 bg-white;
+    box-shadow:
+      0 1px 3px rgba(0, 0, 0, 0.08),
+      0 4px 16px rgba(0, 0, 0, 0.04);
+  }
+
+  .section-heading {
+    @apply flex items-center gap-2 text-base font-semibold text-slate-900;
+  }
+
+  .pill-tab-active {
+    @apply bg-primary text-white shadow-sm;
+  }
+
+  .pill-tab-inactive {
+    @apply bg-slate-100 text-slate-600 hover:bg-slate-200;
+  }
+
+  .scroll-panel {
+    @apply overflow-y-auto;
+    scrollbar-width: thin;
+    scrollbar-color: #cbd5e1 transparent;
+  }
+  .scroll-panel::-webkit-scrollbar {
+    width: 4px;
+  }
+  .scroll-panel::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 4px;
+  }
+  .scroll-panel::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@layer utilities {
+  .urdu-text {
+    font-family: var(--font-urdu), "Noto Nastaliq Urdu", serif;
+    font-size: 1.0625rem;
+    line-height: 1.85;
+    direction: rtl;
+    text-align: right;
+  }
+
+  .urdu-pill {
+    font-family: var(--font-urdu), "Noto Nastaliq Urdu", serif;
+    line-height: 1.5;
+    direction: rtl;
+  }
+
+  .urdu-chip {
+    font-family: var(--font-urdu), "Noto Nastaliq Urdu", serif;
+    line-height: 1.45;
+    direction: rtl;
+  }
+
+  .keyword-tag-urdu {
+    font-family: var(--font-urdu), "Noto Nastaliq Urdu", serif;
+    line-height: 1;
+    direction: rtl;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 8rem;
+  }
+  .line-clamp-3 {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .pulse-dot {
+    @apply relative inline-flex h-2 w-2 rounded-full;
+  }
+  .pulse-dot::before {
+    content: "";
+    @apply absolute inline-flex h-full w-full animate-ping rounded-full opacity-75;
+  }
+
+  .sticky-note-card {
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06), 0 0 0 1px rgba(0, 0, 0, 0.04);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+  }
+  .sticky-note-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.1), 0 0 0 1px rgba(0, 0, 0, 0.04);
+  }
+  .sticky-note-fold::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 0;
+    height: 0;
+    border-style: solid;
+    border-width: 0 18px 18px 0;
+    border-color: transparent #e2e8f0 transparent transparent;
+    border-radius: 0 12px 0 0;
+  }
+  .sticky-note-fold--warm::after {
+    border-color: transparent #fde68a transparent transparent;
+  }
+}
+
+@keyframes dashboardStaggerIn {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.dashboard-stagger-in {
+  animation: dashboardStaggerIn 0.45s ease-out both;
+}
+
+@keyframes tabContentFade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.tab-content-fade[data-state="active"] {
+  animation: tabContentFade 0.15s ease-out;
+}
+
+@keyframes chartPulseRing {
+  0% {
+    transform: scale(1);
+    opacity: 0.35;
+  }
+  70% {
+    transform: scale(1.8);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1.8);
+    opacity: 0;
+  }
+}
+
+.chart-pulse-ring {
+  transform-origin: center;
+  animation: chartPulseRing 2s ease-out infinite;
+}
+
+@keyframes alertNewPulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(217, 119, 6, 0.4);
+  }
+  70% {
+    box-shadow: 0 0 0 10px rgba(217, 119, 6, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(217, 119, 6, 0);
+  }
+}
+
+.alert-new-pulse {
+  animation: alertNewPulse 2s ease-out infinite;
+}
+
+@keyframes dialogIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
