@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/layout/app-shell";
 import {
@@ -29,19 +29,20 @@ export default function SearchPage() {
   const [audioCount, setAudioCount] = useState(0);
   const [loading, setLoading] = useState(false);
 
-  const runSearch = async () => {
+  const runSearch = useCallback(async (nextFilters?: SearchFilters) => {
+    const active = nextFilters ?? filters;
     setLoading(true);
     try {
       const params = {
-        q: filters.q || undefined,
-        start_date: filters.start_date || undefined,
-        end_date: filters.end_date
-          ? `${filters.end_date}T23:59:59`
+        q: active.q || undefined,
+        start_date: active.start_date || undefined,
+        end_date: active.end_date
+          ? `${active.end_date}T23:59:59`
           : undefined,
-        channel: filters.channel || undefined,
-        region: filters.region || undefined,
-        min_confidence: filters.min_confidence
-          ? parseFloat(filters.min_confidence)
+        channel: active.channel || undefined,
+        region: active.region || undefined,
+        min_confidence: active.min_confidence
+          ? parseFloat(active.min_confidence)
           : undefined,
       };
       const [text, audio] = await Promise.all([
@@ -60,7 +61,13 @@ export default function SearchPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [filters]);
+
+  // Auto-load recent results on first visit
+  useEffect(() => {
+    void runSearch();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <AppShell monitorRunning={monitor.running}>
@@ -78,7 +85,7 @@ export default function SearchPage() {
           <SearchForm
             filters={filters}
             onChange={setFilters}
-            onSubmit={runSearch}
+            onSubmit={() => runSearch()}
             loading={loading}
           />
         </div>

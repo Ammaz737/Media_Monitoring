@@ -473,31 +473,30 @@ def save_audio_chunk(audio_data: np.ndarray,
 def extract_audio_from_rtsp(rtsp_url: str, 
                            duration: float = 30.0,
                            sample_rate: int = 16000) -> np.ndarray:
-    """Extract audio from RTSP stream using ffmpeg"""
+    """Extract audio from RTSP / HLS / HTTP stream using ffmpeg"""
     import subprocess
     
     try:
-        # Use ffmpeg to extract audio from RTSP stream
-        # -i: input RTSP URL
-        # -t: duration in seconds
-        # -vn: no video
-        # -ac 1: mono audio
-        # -ar: sample rate
-        # -f s16le: output format (16-bit signed little-endian PCM)
-        # pipe:1: output to stdout
-        
-        command = [
-            'ffmpeg',
-            '-rtsp_transport', 'tcp',  # Use TCP for more reliable connection
-            '-i', rtsp_url,
+        url = (rtsp_url or '').strip()
+        is_rtsp = url.lower().startswith('rtsp://')
+
+        command = ['ffmpeg']
+        if is_rtsp:
+            command.extend(['-rtsp_transport', 'tcp'])
+        else:
+            # HLS / HTTP / YouTube-derived URLs
+            command.extend(['-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5'])
+
+        command.extend([
+            '-i', url,
             '-t', str(duration),
             '-vn',  # No video
             '-ac', '1',  # Mono
             '-ar', str(sample_rate),  # Sample rate
             '-f', 's16le',  # 16-bit signed PCM
-            '-loglevel', 'quiet',  # Suppress ffmpeg logs
-            'pipe:1'  # Output to stdout
-        ]
+            '-loglevel', 'error',
+            'pipe:1',
+        ])
         
         # Run ffmpeg and capture audio output
         process = subprocess.Popen(
@@ -508,11 +507,10 @@ def extract_audio_from_rtsp(rtsp_url: str,
         )
         
         # Read audio data
-        audio_bytes, stderr = process.communicate(timeout=duration + 5)
+        audio_bytes, stderr = process.communicate(timeout=duration + 15)
         
         if process.returncode != 0:
-            logging.error(f"FFmpeg error: {stderr.decode()}")
-            # Return silence instead of dummy data
+            logging.error(f"FFmpeg audio error: {stderr.decode(errors='ignore')[:500]}")
             samples = int(duration * sample_rate)
             return np.zeros(samples, dtype=np.float32)
         
@@ -522,7 +520,7 @@ def extract_audio_from_rtsp(rtsp_url: str,
         # Convert to float32 and normalize to [-1, 1]
         audio_float = audio_np.astype(np.float32) / 32768.0
         
-        logging.info(f"Extracted {len(audio_float)/sample_rate:.2f}s of audio from RTSP")
+        logging.info(f"Extracted {len(audio_float)/sample_rate:.2f}s of audio from stream")
         
         return audio_float
         
@@ -533,7 +531,7 @@ def extract_audio_from_rtsp(rtsp_url: str,
         return np.zeros(samples, dtype=np.float32)
         
     except Exception as e:
-        logging.error(f"Error extracting audio from RTSP: {e}")
+        logging.error(f"Error extracting audio from stream: {e}")
         # Return silence on error
         samples = int(duration * sample_rate)
         return np.zeros(samples, dtype=np.float32)

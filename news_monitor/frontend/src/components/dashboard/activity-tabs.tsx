@@ -1,5 +1,7 @@
 "use client";
 
+import { useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { Loader2, LayoutList } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -42,6 +44,8 @@ function ActivityCardGrid({ children }: { children: React.ReactNode }) {
   );
 }
 
+const TAB_VALUES = new Set(["extractions", "transcriptions", "alerts"]);
+
 export function ActivityTabs({
   extractions,
   transcriptions,
@@ -49,6 +53,15 @@ export function ActivityTabs({
   loading,
   onMarkAlertRead,
 }: ActivityTabsProps) {
+  const searchParams = useSearchParams();
+  const tabParam = searchParams.get("tab") ?? "extractions";
+  const initialTab = TAB_VALUES.has(tabParam) ? tabParam : "extractions";
+  const [tab, setTab] = useState(initialTab);
+
+  useEffect(() => {
+    if (TAB_VALUES.has(tabParam)) setTab(tabParam);
+  }, [tabParam]);
+
   return (
     <Card className="dashboard-stagger-in overflow-hidden rounded-[20px] border border-[#F1F5F9] bg-white shadow-[0_1px_3px_rgba(0,0,0,0.04),0_8px_24px_rgba(0,0,0,0.06)]" style={{ animationDelay: "250ms" }}>
       <div className="border-b border-slate-100 bg-white px-6 py-4">
@@ -57,7 +70,7 @@ export function ActivityTabs({
           Recent Activity
         </h3>
       </div>
-      <Tabs defaultValue="extractions" className="px-6 pb-6">
+      <Tabs value={tab} onValueChange={setTab} className="px-6 pb-6">
         <TabsList className="mt-4 h-auto w-full justify-start gap-1 rounded-xl bg-[#F8FAFC] p-1">
           <TabsTrigger
             value="extractions"
@@ -125,7 +138,7 @@ export function ActivityTabs({
               className="tab-content-fade scroll-panel mt-2 max-h-[640px]"
             >
               {alerts.length === 0 ? (
-                <EmptyState message="No recent alerts" />
+                <EmptyState message="No recent alerts — add keywords in Settings that appear in ticker text" />
               ) : (
                 <ActivityCardGrid>
                   {alerts.map((a) => (

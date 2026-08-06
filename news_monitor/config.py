@@ -35,6 +35,12 @@ RTSP_CHANNELS = {
 # Default RTSP URL (for backward compatibility)
 RTSP_URL = RTSP_CHANNELS['channel_1']['rtsp_url']
 
+# YouTube auth (optional) — needed for private / members-only / age-gated lives
+# Export cookies once: browser extension "Get cookies.txt LOCALLY" → save as data/youtube_cookies.txt
+# Or set browser name to auto-read (chrome|edge|firefox) — Chrome must be fully closed.
+YOUTUBE_COOKIES_FILE = BASE_DIR / "data" / "youtube_cookies.txt"
+YOUTUBE_COOKIES_FROM_BROWSER = os.environ.get("YOUTUBE_COOKIES_FROM_BROWSER", "").strip() or None
+
 # UTRNet Model Configuration
 UTRNET_CONFIG = {
     'FeatureExtraction': 'HRNet',
@@ -129,6 +135,44 @@ ALERTS_CONFIG = {
         'recipient_emails': []
     }
 }
+
+# Persist Settings UI changes (keywords, etc.) across restarts
+RUNTIME_CONFIG_PATH = BASE_DIR / 'data' / 'runtime_config.json'
+
+
+def load_runtime_config() -> None:
+    """Merge saved runtime settings into in-memory config."""
+    import json
+
+    if not RUNTIME_CONFIG_PATH.exists():
+        return
+    try:
+        with open(RUNTIME_CONFIG_PATH, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        keywords = data.get('alert_keywords')
+        if isinstance(keywords, list):
+            cleaned = [str(k).strip() for k in keywords if str(k).strip()]
+            ALERTS_CONFIG['keywords'] = cleaned
+        if 'alerts_enabled' in data:
+            ALERTS_CONFIG['enabled'] = bool(data['alerts_enabled'])
+    except Exception:
+        pass
+
+
+def save_runtime_config() -> None:
+    """Persist mutable runtime settings to disk."""
+    import json
+
+    RUNTIME_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        'alert_keywords': list(ALERTS_CONFIG.get('keywords', [])),
+        'alerts_enabled': bool(ALERTS_CONFIG.get('enabled', True)),
+    }
+    with open(RUNTIME_CONFIG_PATH, 'w', encoding='utf-8') as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+load_runtime_config()
 
 # Web Interface Configuration
 WEB_CONFIG = {

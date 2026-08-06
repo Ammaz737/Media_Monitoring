@@ -352,7 +352,7 @@ class NewsDatabase:
                    is_read: bool = None,
                    alert_type: str = None,
                    severity: str = None,
-                   limit: int = 100) -> List[Dict]:
+                   limit: int = 1000) -> List[Dict]:
         """Get alerts with filters"""
         
         with sqlite3.connect(self.db_path) as conn:
@@ -374,7 +374,7 @@ class NewsDatabase:
                 params.append(severity)
             
             sql += " ORDER BY timestamp DESC LIMIT ?"
-            params.append(limit)
+            params.append(max(1, min(int(limit or 1000), 5000)))
             
             cursor.execute(sql, params)
             
@@ -389,6 +389,39 @@ class NewsDatabase:
                 results.append(record)
             
             return results
+
+    def get_alert_counts(self) -> Dict[str, int]:
+        """Total / unread / read alert counts (not limited by page size)."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM alerts")
+            total = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM alerts WHERE is_read = 0 OR is_read = FALSE")
+            unread = cursor.fetchone()[0]
+            return {
+                'total': total,
+                'unread': unread,
+                'read': max(0, total - unread),
+            }
+
+    def mark_all_alerts_read(self) -> int:
+        """Mark every unread alert as read. Returns rows updated."""
+        with self.lock:
+            try:
+                with sqlite3.connect(self.db_path) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        """
+                        UPDATE alerts
+                        SET is_read = TRUE
+                        WHERE is_read = 0 OR is_read = FALSE
+                        """
+                    )
+                    conn.commit()
+                    return cursor.rowcount
+            except Exception as e:
+                logging.error(f"Error marking all alerts read: {e}")
+                return 0
     
     def mark_alert_read(self, alert_uuid: str) -> bool:
         """Mark an alert as read"""
@@ -411,16 +444,15 @@ class NewsDatabase:
                 return False
     
     def _get_daily_activity_series(self, cursor, days: int = 14) -> List[Dict]:
-        """Daily extraction/transcription counts for chart (uses latest data in DB)."""
+        """Daily extraction/transcription counts for chart (fills last N days)."""
         cursor.execute(
             """
             SELECT date(timestamp) AS day, COUNT(*) AS cnt
             FROM text_extractions
+            WHERE timestamp >= date('now', ?)
             GROUP BY date(timestamp)
-            ORDER BY day DESC
-            LIMIT ?
             """,
-            (days,),
+            (f'-{days} day',),
         )
         text_by_day = {row[0]: row[1] for row in cursor.fetchall()}
 
@@ -428,23 +460,23 @@ class NewsDatabase:
             """
             SELECT date(timestamp) AS day, COUNT(*) AS cnt
             FROM audio_transcriptions
+            WHERE timestamp >= date('now', ?)
             GROUP BY date(timestamp)
-            ORDER BY day DESC
-            LIMIT ?
             """,
-            (days,),
+            (f'-{days} day',),
         )
         audio_by_day = {row[0]: row[1] for row in cursor.fetchall()}
 
-        all_days = sorted(set(text_by_day) | set(audio_by_day))
-        return [
-            {
+        series = []
+        today = datetime.now().date()
+        for offset in range(days - 1, -1, -1):
+            day = (today - timedelta(days=offset)).isoformat()
+            series.append({
                 'time': day,
                 'extractions': text_by_day.get(day, 0),
                 'transcriptions': audio_by_day.get(day, 0),
-            }
-            for day in all_days
-        ]
+            })
+        return series
 
     def get_statistics(self, 
                       start_date: datetime = None, 
@@ -530,6 +562,94 @@ class NewsDatabase:
                 },
                 'chart_series': chart_series,
             }
+
+    def get_search_facets(self) -> Dict:
+        """Distinct channel/region values for search filters."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT DISTINCT channel_name FROM text_extractions
+                WHERE channel_name IS NOT NULL AND TRIM(channel_name) != ''
+                ORDER BY channel_name
+                """
+            )
+            channels = [row[0] for row in cursor.fetchall()]
+            cursor.execute(
+                """
+                SELECT DISTINCT channel_name FROM audio_transcriptions
+                WHERE channel_name IS NOT NULL AND TRIM(channel_name) != ''
+                ORDER BY channel_name
+                """
+            )
+            for row in cursor.fetchall():
+                if row[0] not in channels:
+                    channels.append(row[0])
+            cursor.execute(
+                """
+                SELECT DISTINCT region_name FROM text_extractions
+                WHERE region_name IS NOT NULL AND TRIM(region_name) != ''
+                ORDER BY region_name
+                """
+            )
+            regions = [row[0] for row in cursor.fetchall()]
+            return {'channels': channels, 'regions': regions}
+
+    def rescan_alerts_for_keywords(
+        self,
+        keywords: List[str],
+        limit: int = 200,
+    ) -> int:
+        """Create alerts for recent text that matches current keywords."""
+        if not keywords:
+            return 0
+
+        created = 0
+        rows = self.search_text_extractions(limit=limit)
+        for row in rows:
+            text = row.get('extracted_text') or ''
+            if not text:
+                continue
+            matched = []
+            text_l = text.lower()
+            for kw in keywords:
+                kw_s = (kw or '').strip()
+                if not kw_s:
+                    continue
+                # Arabic/Urdu: case-folding is a no-op; English: lower both
+                if any('\u0600' <= ch <= '\u06FF' for ch in kw_s):
+                    if kw_s in text:
+                        matched.append(kw_s)
+                elif kw_s.lower() in text_l:
+                    matched.append(kw_s)
+            if not matched:
+                continue
+            # Avoid duplicate alerts for same content + same keyword set
+            content_id = row.get('uuid')
+            if not content_id:
+                continue
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT COUNT(*) FROM alerts
+                    WHERE content_id = ? AND alert_type = 'keyword_match'
+                    """,
+                    (content_id,),
+                )
+                if cursor.fetchone()[0] > 0:
+                    continue
+            alert_uuid = self.insert_alert(
+                alert_type='keyword_match',
+                content_type='text',
+                content_id=content_id,
+                matched_keywords=matched,
+                alert_text=text[:500],
+                severity='high' if any(kw in ['عاجل', 'breaking'] for kw in matched) else 'medium',
+            )
+            if alert_uuid:
+                created += 1
+        return created
     
     def cleanup_old_data(self, days_to_keep: int = None):
         """Clean up old data based on retention policy"""

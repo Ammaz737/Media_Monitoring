@@ -20,6 +20,8 @@ export function SettingsPanel() {
   );
   const [usingFallback, setUsingFallback] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [keywordBusy, setKeywordBusy] = useState(false);
+  const [keywordStatus, setKeywordStatus] = useState<string | null>(null);
 
   useEffect(() => {
     api
@@ -53,16 +55,53 @@ export function SettingsPanel() {
       });
   }, []);
 
-  const addKeyword = () => {
+  const addKeyword = async () => {
     const kw = newKeyword.trim();
-    if (kw && !keywords.includes(kw)) {
+    if (!kw || keywords.includes(kw) || keywordBusy) return;
+    if (usingFallback) {
       setKeywords([...keywords, kw]);
       setNewKeyword("");
+      setKeywordStatus("Saved locally only — start Flask to persist");
+      return;
+    }
+    setKeywordBusy(true);
+    setKeywordStatus(null);
+    try {
+      const res = await api.updateKeywords({ action: "add", keyword: kw });
+      setKeywords(res.keywords);
+      setNewKeyword("");
+      const created = res.alerts_created ?? 0;
+      setKeywordStatus(
+        created > 0
+          ? `Saved. Matched ${created} recent extraction(s) → Alerts`
+          : "Keyword saved"
+      );
+    } catch (e) {
+      setKeywordStatus(e instanceof Error ? e.message : "Failed to save keyword");
+    } finally {
+      setKeywordBusy(false);
     }
   };
 
-  const removeKeyword = (kw: string) => {
-    setKeywords(keywords.filter((k) => k !== kw));
+  const removeKeyword = async (kw: string) => {
+    if (keywordBusy) return;
+    if (usingFallback) {
+      setKeywords(keywords.filter((k) => k !== kw));
+      return;
+    }
+    setKeywordBusy(true);
+    setKeywordStatus(null);
+    try {
+      const res = await api.updateKeywords({ action: "remove", keyword: kw });
+      setKeywords(res.keywords);
+      setKeywordStatus("Keyword removed");
+    } catch (e) {
+      setKeywordStatus(
+        e instanceof Error ? e.message : "Failed to remove keyword"
+      );
+    } finally {
+      setKeywordBusy(false);
+    }
   };
 
   if (error) {
@@ -109,6 +148,8 @@ export function SettingsPanel() {
           onAddKeyword={addKeyword}
           onRemoveKeyword={removeKeyword}
           notificationMethods={config.alerts.notification_methods}
+          busy={keywordBusy}
+          statusMessage={keywordStatus}
         />
 
         <SectionCard

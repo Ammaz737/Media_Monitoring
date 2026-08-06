@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { AppShell } from "@/components/layout/app-shell";
 import { StatsGrid } from "@/components/dashboard/stats-grid";
 import { ActivityTabs } from "@/components/dashboard/activity-tabs";
@@ -185,13 +185,21 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      <ActivityTabs
-        extractions={extractions}
-        transcriptions={transcriptions}
-        alerts={alerts}
-        loading={loading}
-        onMarkAlertRead={handleMarkRead}
-      />
+      <Suspense
+        fallback={
+          <div className="py-8 text-center text-sm text-slate-500">
+            Loading activity...
+          </div>
+        }
+      >
+        <ActivityTabs
+          extractions={extractions}
+          transcriptions={transcriptions}
+          alerts={alerts}
+          loading={loading}
+          onMarkAlertRead={handleMarkRead}
+        />
+      </Suspense>
     </AppShell>
   );
 }

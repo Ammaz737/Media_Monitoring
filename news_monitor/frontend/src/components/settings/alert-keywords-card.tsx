@@ -12,6 +12,8 @@ interface AlertKeywordsCardProps {
   onAddKeyword: () => void;
   onRemoveKeyword: (kw: string) => void;
   notificationMethods: string[];
+  busy?: boolean;
+  statusMessage?: string | null;
 }
 
 const METHOD_META: Record<
@@ -91,6 +93,8 @@ export function AlertKeywordsCard({
   onAddKeyword,
   onRemoveKeyword,
   notificationMethods,
+  busy,
+  statusMessage,
 }: AlertKeywordsCardProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const prevKeywordsRef = useRef<string[]>(keywords);
@@ -164,7 +168,8 @@ export function AlertKeywordsCard({
           <button
             type="button"
             onClick={submitKeyword}
-            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[#1E3A8A] to-[#1E40AF] text-white shadow-[0_2px_6px_rgba(30,64,175,0.35)] transition-all duration-150 hover:scale-105 hover:shadow-[0_3px_10px_rgba(30,64,175,0.4)] active:scale-[0.98]"
+            disabled={busy || !newKeyword.trim()}
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[#1E3A8A] to-[#1E40AF] text-white shadow-[0_2px_6px_rgba(30,64,175,0.35)] transition-all duration-150 hover:scale-105 hover:shadow-[0_3px_10px_rgba(30,64,175,0.4)] active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
             aria-label="Add keyword"
           >
             <Plus className="h-5 w-5" strokeWidth={2.5} />
@@ -175,11 +180,13 @@ export function AlertKeywordsCard({
             value={newKeyword}
             onChange={(e) => onNewKeywordChange(e.target.value)}
             onKeyDown={handleKeyDown}
+            disabled={busy}
             dir="auto"
             placeholder="Type keyword and press Enter..."
             className={cn(
               "h-10 min-w-0 flex-1 rounded-full border-[1.5px] border-[#E2E8F0] bg-white px-4 text-sm text-slate-900 outline-none transition-all duration-150",
               "placeholder:text-slate-400 focus:border-primary focus:shadow-[0_0_0_3px_rgba(30,64,175,0.1)]",
+              "disabled:opacity-60",
               hasArabicScript(newKeyword) && "font-urdu text-base leading-relaxed"
             )}
           />
@@ -206,9 +213,13 @@ export function AlertKeywordsCard({
           })}
         </div>
 
-        <p className="mt-2 text-[0.72rem] italic text-slate-400">
-          UI-only until saved via backend config
-        </p>
+        {statusMessage ? (
+          <p className="mt-2 text-[0.72rem] text-emerald-600">{statusMessage}</p>
+        ) : (
+          <p className="mt-2 text-[0.72rem] text-slate-400">
+            Keywords save immediately and match new OCR / audio text
+          </p>
+        )}
       </CardContent>
     </Card>
   );

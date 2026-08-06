@@ -28,7 +28,7 @@ export const siteConfig = {
     dashboardTranscriptions: 10,
     dashboardAlerts: 5,
     searchResults: 50,
-    alertsPage: 100,
+    alertsPage: 1000,
   },
 
   nav: [

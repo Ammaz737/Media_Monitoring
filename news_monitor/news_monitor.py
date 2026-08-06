@@ -353,25 +353,35 @@ class NewsMonitor:
             logging.info("Video capture loop ended")
     
     def _audio_capture_loop(self):
-        """Audio capture loop (placeholder implementation)"""
-        # This would typically use ffmpeg or gstreamer to extract audio
-        # from the RTSP stream in real-time
-        
+        """Audio capture loop for RTSP / HLS / YouTube streams"""
         chunk_duration = SPEECH_CONFIG['chunk_duration']
         
         while self.is_running:
             try:
-                # Extract audio chunk from RTSP (placeholder)
+                # Keep YouTube/HLS playback URL fresh (same as video path)
+                stream_url = (
+                    self._refresh_playback_url()
+                    if is_youtube_url(self.source_url)
+                    else self.rtsp_url
+                )
+
                 audio_data = extract_audio_from_rtsp(
-                    self.rtsp_url, 
+                    stream_url,
                     duration=chunk_duration
                 )
+
+                # Skip near-silence (failed capture) so Whisper doesn't burn cycles
+                if audio_data is None or len(audio_data) == 0:
+                    time.sleep(2.0)
+                    continue
+                peak = float(np.max(np.abs(audio_data))) if len(audio_data) else 0.0
+                if peak < 1e-4:
+                    logging.warning("Audio chunk was silence — retrying stream URL")
+                    time.sleep(2.0)
+                    continue
                 
                 if self.speech_transcriber:
                     self.speech_transcriber.add_audio(audio_data)
-                
-                # Sleep for chunk duration
-                time.sleep(chunk_duration)
                 
             except Exception as e:
                 logging.error(f"Error in audio capture loop: {e}")

@@ -14,6 +14,7 @@ venv/
 news_monitor/data/*.db
 news_monitor/data/screenshots/
 news_monitor/data/audio/
+news_monitor/data/runtime_config.json
 news_monitor/logs/
 **/.DS_Store
 *.pth

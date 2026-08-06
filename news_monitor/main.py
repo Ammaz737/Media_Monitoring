@@ -10,6 +10,31 @@ import logging
 import argparse
 from pathlib import Path
 
+# Python 3.12 removed ssl.wrap_socket (needed by older eventlet/curl_cffi/yt-dlp stack)
+import ssl
+if not hasattr(ssl, "wrap_socket"):
+    def _ssl_wrap_socket(sock, keyfile=None, certfile=None, server_side=False,
+                         cert_reqs=ssl.CERT_NONE, ssl_version=None, ca_certs=None,
+                         do_handshake_on_connect=True, suppress_ragged_eofs=True,
+                         ciphers=None):
+        ctx = ssl.SSLContext(ssl_version or ssl.PROTOCOL_TLS_CLIENT)
+        if cert_reqs is not None:
+            ctx.verify_mode = cert_reqs
+        if ca_certs:
+            ctx.load_verify_locations(ca_certs)
+        if certfile:
+            ctx.load_cert_chain(certfile, keyfile)
+        if ciphers:
+            ctx.set_ciphers(ciphers)
+        return ctx.wrap_socket(
+            sock,
+            server_side=server_side,
+            do_handshake_on_connect=do_handshake_on_connect,
+            suppress_ragged_eofs=suppress_ragged_eofs,
+        )
+
+    ssl.wrap_socket = _ssl_wrap_socket  # type: ignore[attr-defined]
+
 # Add current directory to path for imports
 sys.path.append(str(Path(__file__).parent))
 

@@ -13,7 +13,8 @@ import time
 
 from config import (
     WEB_CONFIG, ALERTS_CONFIG, RTSP_URL, RTSP_CHANNELS,
-    TEXT_REGIONS, PROCESSING_CONFIG, SPEECH_CONFIG, UTRNET_CONFIG,
+    TEXT_REGIONS, YOUTUBE_TEXT_REGIONS, PROCESSING_CONFIG, SPEECH_CONFIG, UTRNET_CONFIG,
+    save_runtime_config,
 )
 from database import NewsDatabase
 from news_monitor import NewsMonitor
@@ -40,14 +41,17 @@ def add_cors_headers(response):
         response.headers['Access-Control-Allow-Origin'] = origin
     else:
         response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
     return response
 
 
-@app.route('/api/<path:_path>', methods=['OPTIONS'])
-def api_options(_path):
-    return '', 204
+@app.before_request
+def handle_preflight():
+    """Answer CORS preflight without a catch-all OPTIONS route (avoids HTTP 405)."""
+    if request.method == 'OPTIONS' and request.path.startswith('/api/'):
+        return ('', 204)
+
 
 # Initialize SocketIO for real-time updates with compatibility fix
 try:
@@ -243,7 +247,7 @@ def api_alerts():
         is_read = request.args.get('is_read')
         alert_type = request.args.get('type')
         severity = request.args.get('severity')
-        limit = request.args.get('limit', 100, type=int)
+        limit = request.args.get('limit', 1000, type=int)
         
         # Convert is_read parameter
         is_read_bool = None
@@ -256,14 +260,26 @@ def api_alerts():
             severity=severity,
             limit=limit
         )
+        counts = db.get_alert_counts()
         
         return jsonify({
             'alerts': alerts,
-            'count': len(alerts)
+            'count': len(alerts),
+            'totals': counts,
         })
         
     except Exception as e:
         logging.error(f"Error getting alerts: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/alerts/mark-all-read', methods=['POST'])
+def api_mark_all_alerts_read():
+    """Mark every unread alert as read"""
+    try:
+        updated = db.mark_all_alerts_read()
+        return jsonify({'success': True, 'updated': updated})
+    except Exception as e:
+        logging.error(f"Error marking all alerts read: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/alerts/<alert_uuid>/mark-read', methods=['POST'])
@@ -343,16 +359,24 @@ def api_stop_monitor():
 def api_config():
     """Read-only configuration for settings UI."""
     try:
+        # Prefer live keywords from running monitor when available
+        keywords = ALERTS_CONFIG.get('keywords', [])
+        if news_monitor_instance and getattr(news_monitor_instance, 'alert_system', None):
+            keywords = news_monitor_instance.alert_system.get_keywords()
+
+        # Merge RTSP + YouTube region definitions for settings display
+        text_regions = {**TEXT_REGIONS, **YOUTUBE_TEXT_REGIONS}
+
         return jsonify({
             'rtsp_url': RTSP_URL,
             'rtsp_channels': RTSP_CHANNELS,
-            'text_regions': TEXT_REGIONS,
+            'text_regions': text_regions,
             'processing': PROCESSING_CONFIG,
             'speech': SPEECH_CONFIG,
             'utrnet': {k: v for k, v in UTRNET_CONFIG.items() if k != 'device_id'},
             'alerts': {
                 'enabled': ALERTS_CONFIG.get('enabled', True),
-                'keywords': ALERTS_CONFIG.get('keywords', []),
+                'keywords': keywords,
                 'notification_methods': ALERTS_CONFIG.get('notification_methods', []),
             },
             'web': {
@@ -362,6 +386,92 @@ def api_config():
         })
     except Exception as e:
         logging.error(f"Error getting config: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/config/keywords', methods=['GET', 'POST'])
+def api_update_keywords():
+    """Add/remove/replace alert keywords and persist them."""
+    try:
+        if request.method == 'GET':
+            keywords = ALERTS_CONFIG.get('keywords', [])
+            if news_monitor_instance and getattr(news_monitor_instance, 'alert_system', None):
+                keywords = news_monitor_instance.alert_system.get_keywords()
+            return jsonify({'keywords': keywords})
+
+        body = request.get_json() or {}
+        action = (body.get('action') or 'set').lower()
+
+        current = list(ALERTS_CONFIG.get('keywords', []))
+        if news_monitor_instance and getattr(news_monitor_instance, 'alert_system', None):
+            current = news_monitor_instance.alert_system.get_keywords()
+
+        if action == 'add':
+            to_add = body.get('keywords') or []
+            if body.get('keyword'):
+                to_add = list(to_add) + [body.get('keyword')]
+            for kw in to_add:
+                value = (kw or '').strip()
+                if value and value not in current:
+                    current.append(value)
+        elif action == 'remove':
+            to_remove = set()
+            if body.get('keyword'):
+                to_remove.add(str(body.get('keyword')).strip())
+            for kw in body.get('keywords') or []:
+                to_remove.add(str(kw).strip())
+            current = [k for k in current if k not in to_remove]
+        else:
+            # Full replace
+            incoming = body.get('keywords')
+            if incoming is None:
+                return jsonify({'error': 'keywords array required'}), 400
+            seen = set()
+            current = []
+            for kw in incoming:
+                value = str(kw).strip()
+                if value and value not in seen:
+                    current.append(value)
+                    seen.add(value)
+
+        ALERTS_CONFIG['keywords'] = current
+        save_runtime_config()
+
+        if news_monitor_instance and getattr(news_monitor_instance, 'alert_system', None):
+            news_monitor_instance.alert_system.set_keywords(current)
+
+        # Backfill alerts from recent OCR so Alerts page is not empty after save
+        created = 0
+        try:
+            created = db.rescan_alerts_for_keywords(current, limit=300)
+        except Exception as scan_err:
+            logging.warning(f"Keyword rescan skipped: {scan_err}")
+
+        return jsonify({
+            'success': True,
+            'keywords': current,
+            'alerts_created': created,
+        })
+    except Exception as e:
+        logging.error(f"Error updating keywords: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/search-facets')
+def api_search_facets():
+    """Distinct channels/regions for search filter dropdowns."""
+    try:
+        facets = db.get_search_facets()
+        # Always include configured region keys as fallbacks
+        known_regions = list(dict.fromkeys(
+            list(facets.get('regions') or [])
+            + list(TEXT_REGIONS.keys())
+            + list(YOUTUBE_TEXT_REGIONS.keys())
+        ))
+        facets['regions'] = known_regions
+        return jsonify(facets)
+    except Exception as e:
+        logging.error(f"Error getting search facets: {e}")
         return jsonify({'error': str(e)}), 500
 
 

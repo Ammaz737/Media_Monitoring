@@ -52,14 +52,25 @@ class AlertSystem:
         self._start_notification_processor()
         logging.info("Alert system initialized")
     
+    @staticmethod
+    def _has_arabic_script(text: str) -> bool:
+        return any('\u0600' <= ch <= '\u06FF' for ch in text)
+
     def _compile_keyword_patterns(self) -> Dict[str, re.Pattern]:
         """Compile keyword patterns for efficient matching"""
         patterns = {}
         
         for keyword in self.keywords:
             try:
-                # Create case-insensitive pattern that matches whole words
-                pattern = re.compile(rf'\b{re.escape(keyword)}\b', re.IGNORECASE | re.UNICODE)
+                escaped = re.escape(keyword)
+                # Arabic/Urdu: substring match (word boundaries are unreliable)
+                if self._has_arabic_script(keyword):
+                    pattern = re.compile(escaped, re.IGNORECASE | re.UNICODE)
+                else:
+                    pattern = re.compile(
+                        rf'(?<!\w){escaped}(?!\w)',
+                        re.IGNORECASE | re.UNICODE,
+                    )
                 patterns[keyword] = pattern
             except re.error as e:
                 logging.warning(f"Invalid regex pattern for keyword '{keyword}': {e}")
@@ -278,16 +289,23 @@ Automated News Monitoring System
     def add_keywords(self, keywords: List[str]):
         """Add new keywords to monitor"""
         for keyword in keywords:
-            if keyword not in self.keywords:
-                self.keywords.append(keyword)
-                
-                # Compile pattern for new keyword
-                try:
-                    pattern = re.compile(rf'\b{re.escape(keyword)}\b', re.IGNORECASE | re.UNICODE)
-                    self.keyword_patterns[keyword] = pattern
-                    logging.info(f"Added keyword: {keyword}")
-                except re.error as e:
-                    logging.warning(f"Invalid regex pattern for keyword '{keyword}': {e}")
+            kw = (keyword or '').strip()
+            if not kw or kw in self.keywords:
+                continue
+            self.keywords.append(kw)
+            try:
+                escaped = re.escape(kw)
+                if self._has_arabic_script(kw):
+                    pattern = re.compile(escaped, re.IGNORECASE | re.UNICODE)
+                else:
+                    pattern = re.compile(
+                        rf'(?<!\w){escaped}(?!\w)',
+                        re.IGNORECASE | re.UNICODE,
+                    )
+                self.keyword_patterns[kw] = pattern
+                logging.info(f"Added keyword: {kw}")
+            except re.error as e:
+                logging.warning(f"Invalid regex pattern for keyword '{kw}': {e}")
     
     def remove_keywords(self, keywords: List[str]):
         """Remove keywords from monitoring"""
@@ -296,6 +314,19 @@ Automated News Monitoring System
                 self.keywords.remove(keyword)
                 self.keyword_patterns.pop(keyword, None)
                 logging.info(f"Removed keyword: {keyword}")
+
+    def set_keywords(self, keywords: List[str]):
+        """Replace the full keyword list"""
+        cleaned = []
+        seen = set()
+        for kw in keywords:
+            value = (kw or '').strip()
+            if value and value not in seen:
+                cleaned.append(value)
+                seen.add(value)
+        self.keywords = cleaned
+        self.keyword_patterns = self._compile_keyword_patterns()
+        logging.info(f"Keywords updated ({len(self.keywords)} total)")
     
     def get_keywords(self) -> List[str]:
         """Get current list of monitored keywords"""

@@ -69,6 +69,24 @@ export const api = {
 
   getConfig: () => request<AppConfig>("/api/config"),
 
+  updateKeywords: (body: {
+    action?: "add" | "remove" | "set";
+    keyword?: string;
+    keywords?: string[];
+  }) =>
+    request<{
+      success: boolean;
+      keywords: string[];
+      alerts_created?: number;
+      error?: string;
+    }>("/api/config/keywords", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  getSearchFacets: () =>
+    request<{ channels: string[]; regions: string[] }>("/api/search-facets"),
+
   getRecentExtractions: (limit = siteConfig.pagination.dashboardExtractions) =>
     request<{ extractions: TextExtraction[]; count: number }>(
       `/api/recent-extractions?limit=${limit}`
@@ -93,13 +111,23 @@ export const api = {
     if (params?.type) q.set("type", params.type);
     if (params?.severity) q.set("severity", params.severity);
     q.set("limit", String(params?.limit ?? siteConfig.pagination.alertsPage));
-    return request<{ alerts: Alert[]; count: number }>(`/api/alerts?${q}`);
+    return request<{
+      alerts: Alert[];
+      count: number;
+      totals?: { total: number; unread: number; read: number };
+    }>(`/api/alerts?${q}`);
   },
 
   markAlertRead: (uuid: string) =>
     request<{ success: boolean }>(`/api/alerts/${uuid}/mark-read`, {
       method: "POST",
     }),
+
+  markAllAlertsRead: () =>
+    request<{ success: boolean; updated?: number }>(
+      "/api/alerts/mark-all-read",
+      { method: "POST" }
+    ),
 
   searchText: (params: {
     q?: string;

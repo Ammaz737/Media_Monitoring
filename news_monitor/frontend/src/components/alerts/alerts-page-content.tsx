@@ -16,6 +16,7 @@ type Filter = "all" | "unread" | "read";
 export function AlertsPageContent() {
   const [filter, setFilter] = useState<Filter>("all");
   const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [totals, setTotals] = useState({ total: 0, unread: 0, read: 0 });
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
@@ -28,8 +29,19 @@ export function AlertsPageContent() {
       if (filter === "read") params.is_read = true;
       const res = await api.getAlerts(params);
       setAlerts(res.alerts);
+      if (res.totals) {
+        setTotals(res.totals);
+      } else {
+        // Fallback if Flask not restarted yet
+        setTotals({
+          total: res.count,
+          unread: res.alerts.filter((a) => !a.is_read).length,
+          read: res.alerts.filter((a) => a.is_read).length,
+        });
+      }
     } catch {
       setAlerts([]);
+      setTotals({ total: 0, unread: 0, read: 0 });
     } finally {
       setLoading(false);
     }
@@ -39,35 +51,54 @@ export function AlertsPageContent() {
     load();
   }, [load]);
 
-  const unreadCount = alerts.filter((a) => !a.is_read).length;
-  const readCount = alerts.filter((a) => a.is_read).length;
-
   const markRead = async (uuid: string) => {
     try {
       await api.markAlertRead(uuid);
       setAlerts((prev) =>
         prev.map((a) => (a.uuid === uuid ? { ...a, is_read: true } : a))
       );
+      setTotals((prev) => ({
+        ...prev,
+        unread: Math.max(0, prev.unread - 1),
+        read: prev.read + 1,
+      }));
     } catch {
       /* ignore */
     }
   };
 
   const markAllRead = async () => {
-    const unread = alerts.filter((a) => !a.is_read);
-    await Promise.all(
-      unread.map((a) => api.markAlertRead(a.uuid).catch(() => {}))
-    );
+    try {
+      await api.markAllAlertsRead();
+    } catch {
+      // Fallback: mark currently loaded unread items
+      const unread = alerts.filter((a) => !a.is_read);
+      await Promise.all(
+        unread.map((a) => api.markAlertRead(a.uuid).catch(() => {}))
+      );
+    }
     setAlerts((prev) => prev.map((a) => ({ ...a, is_read: true })));
+    setTotals((prev) => ({
+      total: prev.total,
+      unread: 0,
+      read: prev.total,
+    }));
+    if (filter === "unread") {
+      setAlerts([]);
+    }
   };
 
+  const unreadCount = totals.unread;
+  const readCount = totals.read;
+  const totalCount = totals.total;
+
   const statBoxes: {
-    key: Filter | "showing";
+    key: Filter | "total";
     label: string;
     value: number;
     filterTarget?: Filter;
   }[] = [
-    { key: "showing", label: "Showing", value: alerts.length },
+    { key: "total", label: "Total", value: totalCount },
     {
       key: "unread",
       label: "Unread",
@@ -197,15 +228,24 @@ export function AlertsPageContent() {
           </p>
         </Card>
       ) : (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          {alerts.map((a) => (
-            <AlertCard
-              key={a.uuid}
-              item={a}
-              onMarkRead={!a.is_read ? markRead : undefined}
-            />
-          ))}
-        </div>
+        <>
+          <p className="text-sm text-slate-500">
+            Showing {alerts.length}
+            {filter === "all" && totals.total > alerts.length
+              ? ` of ${totals.total}`
+              : ""}{" "}
+            alert{alerts.length === 1 ? "" : "s"}
+          </p>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            {alerts.map((a) => (
+              <AlertCard
+                key={a.uuid}
+                item={a}
+                onMarkRead={!a.is_read ? markRead : undefined}
+              />
+            ))}
+          </div>
+        </>
       )}
     </div>
   );

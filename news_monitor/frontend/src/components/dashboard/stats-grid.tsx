@@ -13,17 +13,27 @@ export function StatsGrid({ database, monitor }: StatsGridProps) {
   const db = database?.totals;
   const recent = database?.recent_activity;
 
+  // Prefer live session rate; fall back to last-24h average so card isn't stuck at 0
+  const liveRate = monitor?.extractions_per_minute ?? 0;
+  const dbRate24h = (recent?.text_extractions_24h ?? 0) / 1440;
+  const extractionsPerMin = liveRate > 0 ? liveRate : dbRate24h;
+  const fps = monitor?.frames_per_second ?? 0;
+  const isLive = Boolean(monitor?.is_running) || (monitor?.runtime_seconds ?? 0) > 0;
+  const sessionLabel = isLive
+    ? `${fps.toFixed(1)} FPS · session ${monitor?.text_extractions ?? 0}`
+    : `${recent?.text_extractions_24h ?? 0} / 24h`;
+
   return (
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
       <StatCard
         staggerIndex={0}
         title="Performance"
         icon={Zap}
-        numericValue={monitor?.extractions_per_minute ?? 0}
+        numericValue={extractionsPerMin}
         decimals={1}
         label="Extractions/min"
         badge={{
-          text: `${(monitor?.frames_per_second ?? 0).toFixed(1)} FPS`,
+          text: sessionLabel,
           variant: "gray",
         }}
         iconBg="bg-[#EFF6FF]"

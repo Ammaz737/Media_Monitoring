@@ -1,11 +1,13 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { SectionCard } from "@/components/ui/section-card";
+import { api } from "@/lib/api";
 
 export interface SearchFilters {
   q: string;
@@ -29,6 +31,28 @@ export function SearchForm({
   onSubmit,
   loading,
 }: SearchFormProps) {
+  const [channels, setChannels] = useState<string[]>([]);
+  const [regions, setRegions] = useState<string[]>([]);
+
+  useEffect(() => {
+    api
+      .getSearchFacets()
+      .then((facets) => {
+        setChannels(facets.channels ?? []);
+        setRegions(facets.regions ?? []);
+      })
+      .catch(() => {
+        setChannels([]);
+        setRegions([
+          "ticker",
+          "headline",
+          "side_text",
+          "youtube_ticker",
+          "youtube_top_bar",
+        ]);
+      });
+  }, []);
+
   const set = (key: keyof SearchFilters, value: string) =>
     onChange({ ...filters, [key]: value });
 
@@ -57,6 +81,12 @@ export function SearchForm({
               value={filters.q}
               onChange={(e) => set("q", e.target.value)}
               dir="auto"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  onSubmit();
+                }
+              }}
             />
           </div>
         </div>
@@ -93,9 +123,11 @@ export function SearchForm({
             onChange={(e) => set("channel", e.target.value)}
           >
             <option value="">All channels</option>
-            <option value="news_channel">news_channel</option>
-            <option value="channel_1">channel_1</option>
-            <option value="channel_2">channel_2</option>
+            {channels.map((ch) => (
+              <option key={ch} value={ch}>
+                {ch}
+              </option>
+            ))}
           </Select>
         </div>
 
@@ -108,9 +140,11 @@ export function SearchForm({
             onChange={(e) => set("region", e.target.value)}
           >
             <option value="">All regions</option>
-            <option value="ticker">ticker</option>
-            <option value="headline">headline</option>
-            <option value="side_text">side_text</option>
+            {regions.map((r) => (
+              <option key={r} value={r}>
+                {r}
+              </option>
+            ))}
           </Select>
         </div>
 
