@@ -22,6 +22,17 @@ export function SettingsPanel() {
   const [error, setError] = useState<string | null>(null);
   const [keywordBusy, setKeywordBusy] = useState(false);
   const [keywordStatus, setKeywordStatus] = useState<string | null>(null);
+  const [channelBusy, setChannelBusy] = useState(false);
+  const [channelStatus, setChannelStatus] = useState<string | null>(null);
+
+  const applyChannels = (channels: AppConfig["rtsp_channels"]) => {
+    setConfig((prev) => (prev ? { ...prev, rtsp_channels: channels } : prev));
+    const enabled: Record<string, boolean> = {};
+    Object.entries(channels).forEach(([id, ch]) => {
+      enabled[id] = ch.enabled;
+    });
+    setChannelEnabled(enabled);
+  };
 
   useEffect(() => {
     api
@@ -136,8 +147,62 @@ export function SettingsPanel() {
           defaultUrl={config.rtsp_url}
           channels={config.rtsp_channels}
           channelEnabled={channelEnabled}
-          onToggle={(id, enabled) =>
-            setChannelEnabled((prev) => ({ ...prev, [id]: enabled }))
+          busy={channelBusy}
+          statusMessage={channelStatus}
+          onToggle={async (id, enabled) => {
+            setChannelEnabled((prev) => ({ ...prev, [id]: enabled }));
+            if (usingFallback) return;
+            try {
+              const res = await api.updateChannel(id, enabled);
+              if (res.channels) applyChannels(res.channels);
+            } catch (e) {
+              setChannelEnabled((prev) => ({ ...prev, [id]: !enabled }));
+              setChannelStatus(
+                e instanceof Error ? e.message : "Failed to update channel"
+              );
+            }
+          }}
+          onAdd={
+            usingFallback
+              ? undefined
+              : async (channel) => {
+                  setChannelBusy(true);
+                  setChannelStatus(null);
+                  try {
+                    const res = await api.createChannel(channel);
+                    applyChannels(res.channels);
+                    setChannelStatus(`Added ${res.channel.name}`);
+                    return true;
+                  } catch (e) {
+                    setChannelStatus(
+                      e instanceof Error ? e.message : "Failed to add channel"
+                    );
+                    return false;
+                  } finally {
+                    setChannelBusy(false);
+                  }
+                }
+          }
+          onDelete={
+            usingFallback
+              ? undefined
+              : async (id) => {
+                  setChannelBusy(true);
+                  setChannelStatus(null);
+                  try {
+                    const res = await api.deleteChannel(id);
+                    applyChannels(res.channels);
+                    setChannelStatus("Channel removed");
+                  } catch (e) {
+                    setChannelStatus(
+                      e instanceof Error
+                        ? e.message
+                        : "Failed to delete channel"
+                    );
+                  } finally {
+                    setChannelBusy(false);
+                  }
+                }
           }
         />
 
@@ -198,6 +263,10 @@ export function SettingsPanel() {
               ["Speech model", String(config.speech.model)],
               ["Results per page", String(config.web.results_per_page)],
               ["Max search results", String(config.web.max_search_results)],
+              [
+                "Auto-start monitoring",
+                config.auto_start_monitoring ? "On" : "Off",
+              ],
               [
                 "Frontend API",
                 siteConfig.api.baseUrl || "(proxied /api)",

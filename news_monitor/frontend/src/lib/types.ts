@@ -81,6 +81,20 @@ export interface MonitorStatusResponse {
   channel_name: string | null;
   source_url?: string;
   stream_error?: string | null;
+  multi_channel?: boolean;
+  channel_status?: {
+    overall_running?: boolean;
+    channels?: Record<
+      string,
+      {
+        name: string;
+        running: boolean;
+        frames_captured?: number;
+        stream_error?: string | null;
+        error?: string;
+      }
+    >;
+  };
   statistics: MonitorStats;
 }
 
@@ -103,6 +117,7 @@ export interface AppConfig {
     notification_methods: string[];
   };
   web: { max_search_results: number; results_per_page: number };
+  auto_start_monitoring?: boolean;
 }
 
 export interface RealtimeUpdate {
@@ -110,5 +125,10 @@ export interface RealtimeUpdate {
   recent_extractions?: TextExtraction[];
   recent_transcriptions?: AudioTranscription[];
   recent_alerts?: Alert[];
-  statistics?: MonitorStats;
+  statistics?:
+    | MonitorStats
+    | {
+        database?: DatabaseStats;
+        monitor?: MonitorStats;
+      };
 }

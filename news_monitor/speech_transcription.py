@@ -472,66 +472,97 @@ def save_audio_chunk(audio_data: np.ndarray,
 
 def extract_audio_from_rtsp(rtsp_url: str, 
                            duration: float = 30.0,
-                           sample_rate: int = 16000) -> np.ndarray:
-    """Extract audio from RTSP / HLS / HTTP stream using ffmpeg"""
+                           sample_rate: int = 16000) -> Optional[np.ndarray]:
+    """Extract audio from RTSP / HLS / HTTP stream using ffmpeg.
+
+    Returns float32 mono PCM in [-1, 1], or None if capture failed / no audio.
+    """
     import subprocess
     
+    process = None
     try:
         url = (rtsp_url or '').strip()
+        if not url:
+            return None
         is_rtsp = url.lower().startswith('rtsp://')
 
-        command = ['ffmpeg']
+        command = ['ffmpeg', '-hide_banner', '-nostdin']
         if is_rtsp:
-            command.extend(['-rtsp_transport', 'tcp'])
+            # TCP + short timeouts reduce demux hangs on flaky camera links
+            command.extend([
+                '-rtsp_transport', 'tcp',
+                '-rw_timeout', '5000000',  # 5s (microseconds)
+                '-fflags', '+genpts+discardcorrupt',
+            ])
         else:
-            # HLS / HTTP / YouTube-derived URLs
-            command.extend(['-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5'])
+            command.extend([
+                '-reconnect', '1',
+                '-reconnect_streamed', '1',
+                '-reconnect_delay_max', '5',
+            ])
 
         command.extend([
             '-i', url,
             '-t', str(duration),
             '-vn',  # No video
-            '-ac', '1',  # Mono
-            '-ar', str(sample_rate),  # Sample rate
-            '-f', 's16le',  # 16-bit signed PCM
+            '-map', '0:a:0?',  # First audio if present; don't fail if missing
+            '-ac', '1',
+            '-ar', str(sample_rate),
+            '-f', 's16le',
             '-loglevel', 'error',
             'pipe:1',
         ])
         
-        # Run ffmpeg and capture audio output
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            bufsize=10**8
+            bufsize=10**8,
         )
         
-        # Read audio data
         audio_bytes, stderr = process.communicate(timeout=duration + 15)
-        
+        err_text = (stderr or b'').decode(errors='ignore').strip()
+
         if process.returncode != 0:
-            logging.error(f"FFmpeg audio error: {stderr.decode(errors='ignore')[:500]}")
-            samples = int(duration * sample_rate)
-            return np.zeros(samples, dtype=np.float32)
+            # AVERROR_EXIT / Immediate exit — usually kill/timeout/reconnect, not actionable
+            low = err_text.lower()
+            if 'immediate exit' in low or 'exit requested' in low:
+                logging.debug("FFmpeg audio interrupted: %s", err_text[:200])
+            elif 'does not contain any stream' in low or 'matches no streams' in low:
+                logging.warning("Stream has no audio track — skipping speech for this pull")
+            else:
+                logging.warning("FFmpeg audio failed (rc=%s): %s", process.returncode, err_text[:400])
+            return None
+
+        if not audio_bytes:
+            return None
         
-        # Convert bytes to numpy array
         audio_np = np.frombuffer(audio_bytes, dtype=np.int16)
-        
-        # Convert to float32 and normalize to [-1, 1]
+        if audio_np.size == 0:
+            return None
+
         audio_float = audio_np.astype(np.float32) / 32768.0
-        
-        logging.info(f"Extracted {len(audio_float)/sample_rate:.2f}s of audio from stream")
-        
+        logging.info(
+            "Extracted %.2fs of audio from stream",
+            len(audio_float) / sample_rate,
+        )
         return audio_float
         
     except subprocess.TimeoutExpired:
-        logging.error(f"FFmpeg timeout after {duration}s")
-        process.kill()
-        samples = int(duration * sample_rate)
-        return np.zeros(samples, dtype=np.float32)
+        logging.warning("FFmpeg audio timeout after %ss — killing pull", duration)
+        if process is not None:
+            try:
+                process.kill()
+                process.communicate(timeout=5)
+            except Exception:
+                pass
+        return None
         
     except Exception as e:
-        logging.error(f"Error extracting audio from stream: {e}")
-        # Return silence on error
-        samples = int(duration * sample_rate)
-        return np.zeros(samples, dtype=np.float32)
+        logging.warning("Error extracting audio from stream: %s", e)
+        if process is not None:
+            try:
+                process.kill()
+            except Exception:
+                pass
+        return None

@@ -113,7 +113,7 @@ export default function DashboardPage() {
 
   useEffect(() => {
     loadAll();
-    const interval = setInterval(loadAll, siteConfig.api.refreshIntervalMs);
+    const interval = setInterval(loadAll, siteConfig.api.realtimePollMs);
     return () => clearInterval(interval);
   }, [loadAll]);
 
@@ -129,17 +129,22 @@ export default function DashboardPage() {
   useEffect(() => {
     const unsub = subscribeRealtime(
       (data: RealtimeUpdate) => {
+        const stats = data.statistics;
+        const nested =
+          stats && typeof stats === "object" && "monitor" in stats
+            ? (stats as { database?: DatabaseStats; monitor?: MonitorStats })
+            : null;
         applyUpdate({
-          statistics: data.statistics
-            ? { monitor: data.statistics }
-            : undefined,
+          statistics: nested
+            ? { database: nested.database, monitor: nested.monitor }
+            : stats
+              ? { monitor: stats as MonitorStats }
+              : undefined,
           recent_extractions: data.recent_extractions,
           recent_transcriptions: data.recent_transcriptions,
           recent_alerts: data.recent_alerts,
         });
-        if (data.statistics?.is_running !== undefined) {
-          monitor.refreshStatus();
-        }
+        monitor.refreshStatus();
       },
       () => setConnected(true),
       () => setConnected(false)

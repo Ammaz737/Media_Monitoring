@@ -19,7 +19,7 @@ export const siteConfig = {
 
   monitor: {
     defaultRtspUrl:
-      "rtsp://admin:gcs12345@192.168.2.145:554/Streaming/Channels/101",
+      "rtsp://admin:Admin123.@192.168.2.173:554/Streaming/Channels/101",
     defaultChannelName: "news_channel",
   },
 

@@ -39,6 +39,7 @@ export function useMonitor() {
       setError(null);
       try {
         const res = await api.startMonitor({
+          multi_channel: true,
           rtsp_url: rtspUrl ?? siteConfig.monitor.defaultRtspUrl,
           channel_name: channel ?? siteConfig.monitor.defaultChannelName,
         });

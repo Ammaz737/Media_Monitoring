@@ -41,13 +41,15 @@ class NewsMonitor:
     Processes RTSP streams for real-time text and audio extraction
     """
     
-    def __init__(self, rtsp_url: str = None, channel_name: str = "news_channel"):
+    def __init__(self, rtsp_url: str = None, channel_name: str = "news_channel",
+                 speech_enabled: bool = True):
         self.source_url = (rtsp_url or RTSP_URL).strip()
         self.rtsp_url = self.source_url
         self.channel_name = channel_name
+        self.speech_enabled = speech_enabled
         self.stream_error: Optional[str] = None
         
-        # Initialize components
+        # Each channel loads its own OCR + optional speech models
         self.utr_predictor = None
         self.speech_transcriber = None
         self.database = NewsDatabase()
@@ -89,34 +91,59 @@ class NewsMonitor:
         (Path(__file__).parent / 'logs').mkdir(parents=True, exist_ok=True)
         (Path(__file__).parent / 'data').mkdir(parents=True, exist_ok=True)
     
-    def initialize_models(self):
-        """Initialize AI models"""
+    def initialize_models(self, load_speech: bool = None):
+        """Initialize OCR (required). Speech is optional and can be deferred."""
+        if load_speech is None:
+            load_speech = self.speech_enabled
         try:
-            # Initialize UTRNet predictor
-            self.utr_predictor = UTRNetPredictor(
-                device='cuda',
-                batch_size=PROCESSING_CONFIG['batch_size']
-            )
-            logging.info("UTRNet model initialized successfully")
-            
-            # Initialize speech transcriber if enabled and available
-            if SPEECH_CONFIG.get('enabled', True):
-                try:
-                    from speech_transcription import WHISPER_AVAILABLE
-                    if WHISPER_AVAILABLE:
-                        self.speech_transcriber = RealtimeSpeechTranscriber()
-                        self.speech_transcriber.start()
-                        logging.info("Speech transcription initialized successfully")
-                    else:
-                        logging.info("Speech transcription disabled - Whisper not available")
-                        self.speech_transcriber = None
-                except Exception as e:
-                    logging.warning(f"Speech transcription disabled: {e}")
-                    self.speech_transcriber = None
-            
+            if self.utr_predictor is None:
+                self.utr_predictor = UTRNetPredictor(
+                    device='cuda',
+                    batch_size=PROCESSING_CONFIG['batch_size']
+                )
+                logging.info("UTRNet model initialized for %s", self.channel_name)
+
+            if load_speech:
+                self._init_speech()
+
         except Exception as e:
             logging.error(f"Failed to initialize models: {e}")
             raise
+
+    def _init_speech(self) -> bool:
+        """Load Whisper for this channel. Returns True on success."""
+        if self.speech_transcriber is not None:
+            return True
+        if not SPEECH_CONFIG.get('enabled', True):
+            return False
+        try:
+            from speech_transcription import WHISPER_AVAILABLE
+            if not WHISPER_AVAILABLE:
+                logging.info("Speech transcription disabled - Whisper not available")
+                return False
+            self.speech_transcriber = RealtimeSpeechTranscriber()
+            self.speech_transcriber.start()
+            logging.info("Speech transcription initialized for %s", self.channel_name)
+            return True
+        except Exception as e:
+            logging.warning(f"Speech transcription disabled: {e}")
+            self.speech_transcriber = None
+            return False
+
+    def start_speech_transcription(self) -> bool:
+        """Start audio capture after OCR is already running (deferred boot)."""
+        if not self.is_running:
+            return False
+        if self.audio_thread and self.audio_thread.is_alive():
+            return True
+        if not self._init_speech():
+            return False
+        self.audio_thread = threading.Thread(
+            target=self._audio_capture_loop, daemon=True, name=f"audio-{self.channel_name}"
+        )
+        self.audio_thread.start()
+        logging.info("Audio transcription thread started for %s", self.channel_name)
+        return True
     
     def start_monitoring(self):
         """Start the news monitoring process"""
@@ -155,26 +182,21 @@ class NewsMonitor:
             def _boot_models_and_processing():
                 try:
                     self.stream_error = "Loading OCR models (first start may take 1–2 min)…"
-                    self.initialize_models()
+                    # Load OCR first; speech after (or deferred by MultiChannel)
+                    self.initialize_models(load_speech=False)
                     self.processing_thread = threading.Thread(
                         target=self._processing_loop, daemon=True, name="frame-processing"
                     )
                     self.processing_thread.start()
 
-                    if self.speech_transcriber:
-                        self.audio_thread = threading.Thread(
-                            target=self._audio_capture_loop, daemon=True, name="audio-capture"
-                        )
-                        self.audio_thread.start()
-                        logging.info("Audio transcription thread started")
-                    else:
-                        logging.info("Audio transcription disabled - Whisper not available")
+                    if self.speech_enabled:
+                        self.start_speech_transcription()
 
                     if self.stats['frames_captured'] > 0:
                         self.stream_error = None
                     else:
                         self.stream_error = "OCR ready — waiting for video frames…"
-                    logging.info("OCR processing thread started")
+                    logging.info("OCR processing thread started for %s", self.channel_name)
                 except Exception as e:
                     logging.error(f"Failed to initialize processing: {e}")
                     self.stream_error = str(e)
@@ -208,9 +230,11 @@ class NewsMonitor:
         # Clean up models
         if self.utr_predictor:
             self.utr_predictor.cleanup()
+            self.utr_predictor = None
         
         if self.speech_transcriber:
             self.speech_transcriber.cleanup()
+            self.speech_transcriber = None
         
         # Clear queues
         self._clear_queues()
@@ -278,19 +302,34 @@ class NewsMonitor:
             except queue.Empty:
                 break
     
+    def _wait_reconnect(self, seconds: float = 120.0) -> None:
+        """Sleep up to `seconds` while still running (interruptible)."""
+        deadline = time.time() + seconds
+        while self.is_running and time.time() < deadline:
+            time.sleep(min(1.0, max(0.0, deadline - time.time())))
+
     def _video_capture_loop(self):
-        """Main video capture loop"""
+        """Main video capture loop — retries RTSP every 2 minutes on failure."""
+        RECONNECT_INTERVAL_SEC = 120.0
         cap = None
         last_frame_time = 0
         last_url_refresh = time.time()
         frame_interval = PROCESSING_CONFIG['frame_interval']
         url_refresh_sec = 75 if is_youtube_url(self.source_url) else 0
-        
-        try:
-            cap = self._open_video_capture()
-            logging.info("Video capture initialized")
-            
-            while self.is_running:
+
+        while self.is_running:
+            try:
+                if cap is None:
+                    self.stream_error = "Connecting to stream…"
+                    logging.info("Opening video capture for %s", self.channel_name)
+                    cap = self._open_video_capture()
+                    last_url_refresh = time.time()
+                    logging.info("Video capture initialized for %s", self.channel_name)
+                    if self.stats['frames_captured'] == 0:
+                        self.stream_error = "Connected — waiting for frames…"
+                    else:
+                        self.stream_error = None
+
                 if url_refresh_sec and (time.time() - last_url_refresh) >= url_refresh_sec:
                     try:
                         self._release_capture(cap)
@@ -300,25 +339,44 @@ class NewsMonitor:
                     except Exception as e:
                         logging.warning(f"URL refresh failed: {e}")
                         self.stream_error = str(e)
+                        self._release_capture(cap)
+                        cap = None
+                        logging.warning(
+                            "Will retry %s in %ss…",
+                            self.channel_name,
+                            int(RECONNECT_INTERVAL_SEC),
+                        )
+                        self._wait_reconnect(RECONNECT_INTERVAL_SEC)
+                        continue
 
                 ret, frame = self._read_frame(cap)
-                
+
                 if not ret or frame is None:
-                    logging.warning("Failed to capture frame, reconnecting...")
-                    self.stream_error = "Reconnecting to stream..."
+                    logging.warning(
+                        "Failed to capture frame on %s, reconnecting...",
+                        self.channel_name,
+                    )
+                    self.stream_error = "Reconnecting to stream…"
                     time.sleep(2.0)
                     try:
                         self._release_capture(cap)
                         cap = self._open_video_capture()
                         last_url_refresh = time.time()
                     except Exception as e:
-                        logging.error(f"Reconnect failed: {e}")
+                        logging.error(f"Reconnect failed for {self.channel_name}: {e}")
                         self.stream_error = str(e)
-                        time.sleep(3.0)
+                        self._release_capture(cap)
+                        cap = None
+                        logging.warning(
+                            "Will retry %s in %ss…",
+                            self.channel_name,
+                            int(RECONNECT_INTERVAL_SEC),
+                        )
+                        self._wait_reconnect(RECONNECT_INTERVAL_SEC)
                     continue
-                
+
                 current_time = time.time()
-                
+
                 if current_time - last_frame_time >= frame_interval:
                     try:
                         frame_data = {
@@ -332,29 +390,44 @@ class NewsMonitor:
                         self.stats['frames_captured'] += 1
                         if self.stats['frames_captured'] == 1:
                             self.stream_error = None
-                            logging.info("First frame queued — queue size %s", self.frame_queue.qsize())
+                            logging.info(
+                                "First frame queued on %s — queue size %s",
+                                self.channel_name,
+                                self.frame_queue.qsize(),
+                            )
                         elif self.stats['frames_captured'] % 15 == 0:
                             logging.info(
-                                "Captured %s frames, queue %s",
+                                "Captured %s frames on %s, queue %s",
                                 self.stats['frames_captured'],
+                                self.channel_name,
                                 self.frame_queue.qsize(),
                             )
                     except queue.Full:
                         logging.warning("Frame queue full, dropping frame")
-                
+
                 time.sleep(0.02)
-                
-        except Exception as e:
-            logging.error(f"Error in video capture loop: {e}")
-            self.stream_error = str(e)
-        
-        finally:
-            self._release_capture(cap)
-            logging.info("Video capture loop ended")
+
+            except Exception as e:
+                logging.error(f"Error in video capture loop ({self.channel_name}): {e}")
+                self.stream_error = str(e)
+                self._release_capture(cap)
+                cap = None
+                if not self.is_running:
+                    break
+                logging.warning(
+                    "Will retry %s in %ss…",
+                    self.channel_name,
+                    int(RECONNECT_INTERVAL_SEC),
+                )
+                self._wait_reconnect(RECONNECT_INTERVAL_SEC)
+
+        self._release_capture(cap)
+        logging.info("Video capture loop ended for %s", self.channel_name)
     
     def _audio_capture_loop(self):
         """Audio capture loop for RTSP / HLS / YouTube streams"""
         chunk_duration = SPEECH_CONFIG['chunk_duration']
+        consecutive_failures = 0
         
         while self.is_running:
             try:
@@ -370,16 +443,27 @@ class NewsMonitor:
                     duration=chunk_duration
                 )
 
-                # Skip near-silence (failed capture) so Whisper doesn't burn cycles
+                # Skip failed / empty / near-silence pulls (don't feed Whisper)
                 if audio_data is None or len(audio_data) == 0:
-                    time.sleep(2.0)
+                    consecutive_failures += 1
+                    backoff = min(30.0, 2.0 * consecutive_failures)
+                    if consecutive_failures <= 3 or consecutive_failures % 5 == 0:
+                        logging.warning(
+                            "Audio pull failed on %s (attempt %s) — retry in %.0fs",
+                            self.channel_name,
+                            consecutive_failures,
+                            backoff,
+                        )
+                    time.sleep(backoff)
                     continue
+
                 peak = float(np.max(np.abs(audio_data))) if len(audio_data) else 0.0
                 if peak < 1e-4:
-                    logging.warning("Audio chunk was silence — retrying stream URL")
-                    time.sleep(2.0)
+                    consecutive_failures += 1
+                    time.sleep(min(15.0, 2.0 * consecutive_failures))
                     continue
-                
+
+                consecutive_failures = 0
                 if self.speech_transcriber:
                     self.speech_transcriber.add_audio(audio_data)
                 
@@ -643,6 +727,7 @@ class NewsMonitor:
         runtime = (current_time - self.stats['start_time']).total_seconds() if self.stats['start_time'] else 0
         
         stats = self.stats.copy()
+        start_time = self.stats.get('start_time')
         stats.update({
             'runtime_seconds': runtime,
             'frames_per_second': self.stats['frames_processed'] / runtime if runtime > 0 else 0,
@@ -657,6 +742,8 @@ class NewsMonitor:
             'stream_error': self.stream_error,
             'frames_processed': self.stats['frames_processed'],
             'frames_captured': self.stats['frames_captured'],
+            # JSON-safe (Socket.IO /api payloads)
+            'start_time': start_time.isoformat() if isinstance(start_time, datetime) else start_time,
         })
         
         # Add speech transcription stats if available
@@ -693,10 +780,16 @@ class MultiChannelNewsMonitor:
     """
 
     def __init__(self, channel_configs: Dict = None):
-        self.channel_configs = channel_configs or RTSP_CHANNELS
+        self.database = NewsDatabase()
+        if channel_configs is None:
+            from config import DEFAULT_RTSP_CHANNELS, apply_rtsp_channels
+            self.database.seed_rtsp_channels(DEFAULT_RTSP_CHANNELS)
+            loaded = self.database.get_rtsp_channels()
+            apply_rtsp_channels(loaded)
+            channel_configs = loaded or dict(RTSP_CHANNELS)
+        self.channel_configs = channel_configs
         self.monitors = {}
         self.is_running = False
-        self.database = NewsDatabase()
         self.alert_system = AlertSystem(self.database)
 
         # Initialize monitors for enabled channels
@@ -709,49 +802,108 @@ class MultiChannelNewsMonitor:
         for channel_id, config in self.channel_configs.items():
             if config.get('enabled', False):
                 try:
+                    # OCR per channel; speech started once after all OCR is ready
                     monitor = NewsMonitor(
                         rtsp_url=config['rtsp_url'],
-                        channel_name=config['name']
+                        channel_name=config['name'],
+                        speech_enabled=False,
                     )
                     self.monitors[channel_id] = monitor
-                    logging.info(f"Initialized monitor for channel: {config['name']}")
+                    logging.info("Initialized monitor for channel: %s", config['name'])
                 except Exception as e:
                     logging.error(f"Failed to initialize monitor for {config['name']}: {e}")
 
+    def any_channel_running(self) -> bool:
+        return any(m.is_running for m in self.monitors.values())
+
+    def _wait_for_ocr_ready(self, monitor: "NewsMonitor", timeout: float = 180.0) -> bool:
+        """Block until this channel's UTRNet is loaded (or failed / stopped)."""
+        deadline = time.time() + timeout
+        while self.is_running and time.time() < deadline:
+            if monitor.utr_predictor is not None:
+                return True
+            err = (monitor.stream_error or "").lower()
+            if err and not err.startswith("loading ocr") and not err.startswith("starting"):
+                if any(k in err for k in ("failed", "error", "cuda", "out of memory", "oom")):
+                    return False
+            if not monitor.is_running and monitor.utr_predictor is None:
+                return False
+            time.sleep(0.5)
+        return monitor.utr_predictor is not None
+
     def start_monitoring(self):
-        """Start monitoring all enabled channels"""
-        if self.is_running:
+        """Start monitoring all enabled channels — each loads its own OCR."""
+        if self.is_running or self.any_channel_running():
             logging.warning("Multi-channel monitoring is already running")
             return
 
-        try:
-            self.is_running = True
+        self.is_running = True
 
-            # Start all monitors
-            for channel_id, monitor in self.monitors.items():
-                try:
-                    monitor.start_monitoring()
-                    logging.info(f"Started monitoring for channel: {monitor.channel_name}")
-                except Exception as e:
-                    logging.error(f"Failed to start monitor for {channel_id}: {e}")
+        def _start_all():
+            started = 0
+            first_ready: Optional["NewsMonitor"] = None
+            try:
+                for channel_id, monitor in list(self.monitors.items()):
+                    if not self.is_running:
+                        break
+                    try:
+                        logging.info(
+                            "Starting channel %s (loading its own OCR)…",
+                            monitor.channel_name,
+                        )
+                        monitor.start_monitoring()
+                        ready = self._wait_for_ocr_ready(monitor)
+                        if ready:
+                            started += 1
+                            if first_ready is None:
+                                first_ready = monitor
+                            logging.info(
+                                "OCR ready for %s — starting next channel",
+                                monitor.channel_name,
+                            )
+                        else:
+                            logging.error(
+                                "OCR not ready for %s (%s) — continuing with others",
+                                monitor.channel_name,
+                                monitor.stream_error,
+                            )
+                        time.sleep(0.5)
+                    except Exception as e:
+                        logging.error(f"Failed to start monitor for {channel_id}: {e}")
 
-            logging.info(f"Multi-channel monitoring started for {len(self.monitors)} channels")
+                logging.info(
+                    "Multi-channel OCR active: %s/%s channels",
+                    started,
+                    len(self.monitors),
+                )
 
-        except Exception as e:
-            logging.error(f"Failed to start multi-channel monitoring: {e}")
-            self.stop_monitoring()
-            raise
+                # Audio AFTER all OCR models are loaded (prevents GPU OOM crash)
+                if self.is_running and first_ready and SPEECH_CONFIG.get('enabled', True):
+                    logging.info(
+                        "Starting deferred speech on %s…", first_ready.channel_name
+                    )
+                    try:
+                        ok = first_ready.start_speech_transcription()
+                        if ok:
+                            logging.info("Audio transcription active on %s", first_ready.channel_name)
+                        else:
+                            logging.warning("Audio transcription failed to start")
+                    except Exception as e:
+                        logging.warning("Audio transcription skipped: %s", e)
+
+            except Exception as e:
+                logging.error(f"Multi-channel boot error: {e}")
+
+        threading.Thread(
+            target=_start_all, daemon=True, name="multi-channel-boot"
+        ).start()
 
     def stop_monitoring(self):
         """Stop monitoring all channels"""
-        if not self.is_running:
-            return
-
         logging.info("Stopping multi-channel monitoring...")
 
         self.is_running = False
 
-        # Stop all monitors
         for channel_id, monitor in self.monitors.items():
             try:
                 monitor.stop_monitoring()
@@ -765,30 +917,44 @@ class MultiChannelNewsMonitor:
         """Get combined statistics for all channels"""
         total_stats = {
             'frames_processed': 0,
+            'frames_captured': 0,
             'text_extractions': 0,
             'audio_transcriptions': 0,
             'alerts_triggered': 0,
             'channels_running': 0,
             'channels_total': len(self.monitors),
             'start_time': None,
-            'channel_stats': {}
+            'channel_stats': {},
+            'is_running': self.is_running or self.any_channel_running(),
+            'channel_name': 'multi_channel',
+            'stream_error': None,
+            'queue_sizes': {'frames': 0, 'audio': 0},
         }
+
+        stream_errors = []
 
         for channel_id, monitor in self.monitors.items():
             try:
                 channel_stats = monitor.get_statistics()
                 total_stats['channel_stats'][channel_id] = channel_stats
 
-                # Sum up totals
                 total_stats['frames_processed'] += channel_stats.get('frames_processed', 0)
+                total_stats['frames_captured'] += channel_stats.get('frames_captured', 0)
                 total_stats['text_extractions'] += channel_stats.get('text_extractions', 0)
                 total_stats['audio_transcriptions'] += channel_stats.get('audio_transcriptions', 0)
                 total_stats['alerts_triggered'] += channel_stats.get('alerts_triggered', 0)
 
+                qs = channel_stats.get('queue_sizes') or {}
+                total_stats['queue_sizes']['frames'] += qs.get('frames', 0)
+                total_stats['queue_sizes']['audio'] += qs.get('audio', 0)
+
                 if channel_stats.get('is_running', False):
                     total_stats['channels_running'] += 1
 
-                # Track earliest start time
+                err = channel_stats.get('stream_error')
+                if err:
+                    stream_errors.append(f"{monitor.channel_name}: {err}")
+
                 if channel_stats.get('start_time') and not total_stats['start_time']:
                     total_stats['start_time'] = channel_stats['start_time']
                 elif (channel_stats.get('start_time') and total_stats['start_time'] and
@@ -798,20 +964,39 @@ class MultiChannelNewsMonitor:
             except Exception as e:
                 logging.error(f"Error getting statistics for {channel_id}: {e}")
 
-        # Calculate runtime
+        if stream_errors:
+            total_stats['stream_error'] = '; '.join(stream_errors[:4])
+            if len(stream_errors) > 4:
+                total_stats['stream_error'] += f' (+{len(stream_errors) - 4} more)'
+
         if total_stats['start_time']:
-            from datetime import datetime
-            runtime = (datetime.now() - total_stats['start_time']).total_seconds()
+            st = total_stats['start_time']
+            if isinstance(st, datetime):
+                runtime = (datetime.now() - st).total_seconds()
+                total_stats['start_time'] = st.isoformat()
+            elif isinstance(st, str):
+                try:
+                    runtime = (datetime.now() - datetime.fromisoformat(st)).total_seconds()
+                except ValueError:
+                    runtime = 0
+            else:
+                runtime = 0
             total_stats['runtime_seconds'] = runtime
         else:
             total_stats['runtime_seconds'] = 0
+
+        # Nested channel_stats may still carry datetime — normalize
+        for ch_stats in total_stats.get('channel_stats', {}).values():
+            st = ch_stats.get('start_time')
+            if isinstance(st, datetime):
+                ch_stats['start_time'] = st.isoformat()
 
         return total_stats
 
     def get_channel_status(self) -> Dict:
         """Get status of all channels"""
         status = {
-            'overall_running': self.is_running,
+            'overall_running': self.is_running or self.any_channel_running(),
             'channels': {}
         }
 
@@ -821,10 +1006,13 @@ class MultiChannelNewsMonitor:
                 status['channels'][channel_id] = {
                     'name': monitor.channel_name,
                     'running': channel_stats.get('is_running', False),
+                    'rtsp_url': monitor.source_url,
                     'frames_processed': channel_stats.get('frames_processed', 0),
+                    'frames_captured': channel_stats.get('frames_captured', 0),
                     'text_extractions': channel_stats.get('text_extractions', 0),
                     'audio_transcriptions': channel_stats.get('audio_transcriptions', 0),
-                    'alerts_triggered': channel_stats.get('alerts_triggered', 0)
+                    'alerts_triggered': channel_stats.get('alerts_triggered', 0),
+                    'stream_error': channel_stats.get('stream_error'),
                 }
             except Exception as e:
                 status['channels'][channel_id] = {
@@ -835,6 +1023,30 @@ class MultiChannelNewsMonitor:
 
         return status
 
+    def set_channel_enabled(self, channel_id: str, enabled: bool) -> bool:
+        """Enable/disable a channel at runtime (starts/stops its monitor)."""
+        if channel_id not in self.channel_configs:
+            return False
+
+        self.channel_configs[channel_id]['enabled'] = enabled
+
+        if enabled:
+            if channel_id not in self.monitors:
+                cfg = self.channel_configs[channel_id]
+                self.monitors[channel_id] = NewsMonitor(
+                    rtsp_url=cfg['rtsp_url'],
+                    channel_name=cfg['name'],
+                    speech_enabled=False,
+                )
+            if self.is_running and not self.monitors[channel_id].is_running:
+                self.monitors[channel_id].start_monitoring()
+        else:
+            monitor = self.monitors.get(channel_id)
+            if monitor and monitor.is_running:
+                monitor.stop_monitoring()
+
+        return True
+
     def add_channel(self, channel_id: str, config: Dict):
         """Add a new channel to monitoring"""
         try:
@@ -842,14 +1054,19 @@ class MultiChannelNewsMonitor:
                 logging.warning(f"Channel {channel_id} already exists")
                 return False
 
+            self.channel_configs[channel_id] = dict(config)
+
+            if not config.get('enabled', True):
+                logging.info(f"Registered disabled channel: {config.get('name', channel_id)}")
+                return True
+
             monitor = NewsMonitor(
                 rtsp_url=config['rtsp_url'],
-                channel_name=config['name']
+                channel_name=config['name'],
+                speech_enabled=False,
             )
 
             self.monitors[channel_id] = monitor
-            self.channel_configs[channel_id] = config
-
             logging.info(f"Added new channel: {config['name']}")
 
             # Start monitoring if overall system is running
@@ -866,18 +1083,12 @@ class MultiChannelNewsMonitor:
     def remove_channel(self, channel_id: str):
         """Remove a channel from monitoring"""
         try:
-            if channel_id not in self.monitors:
-                logging.warning(f"Channel {channel_id} not found")
-                return False
+            monitor = self.monitors.get(channel_id)
+            if monitor:
+                if monitor.is_running:
+                    monitor.stop_monitoring()
+                del self.monitors[channel_id]
 
-            # Stop the monitor if it's running
-            if self.monitors[channel_id].is_running:
-                self.monitors[channel_id].stop_monitoring()
-
-            # Remove from monitors dict
-            del self.monitors[channel_id]
-
-            # Remove from config if present
             if channel_id in self.channel_configs:
                 del self.channel_configs[channel_id]
 

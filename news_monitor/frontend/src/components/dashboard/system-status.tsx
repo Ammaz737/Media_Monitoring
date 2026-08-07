@@ -105,8 +105,8 @@ export function SystemStatus({
             className="w-full rounded-xl border border-slate-600 bg-slate-800/80 px-3 py-2.5 font-mono text-xs text-white placeholder:text-slate-500 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500/30 disabled:opacity-60"
           />
           <p className="mt-1.5 text-[0.68rem] leading-relaxed text-slate-500">
-            RTSP (rtsp://...) ya YouTube live link. YouTube ke liye Flask par{" "}
-            <code className="text-sky-300">pip install yt-dlp</code> chahiye.
+            Monitoring auto-starts on app launch for enabled channels. Manage
+            streams in Settings. Failed RTSP links retry every 2 minutes.
           </p>
         </div>
         <div>
@@ -115,7 +115,7 @@ export function SystemStatus({
             className="mb-1.5 flex items-center gap-1.5 text-[0.72rem] font-medium uppercase tracking-wider text-slate-400"
           >
             <Radio className="h-3.5 w-3.5" />
-            Channel name
+            Label (optional)
           </label>
           <input
             id="channel-name"
@@ -123,11 +123,10 @@ export function SystemStatus({
             value={channelName}
             onChange={(e) => setChannelName(e.target.value)}
             disabled={running || loading}
-            placeholder="news_channel"
+            placeholder="multi_channel"
             className="w-full rounded-xl border border-slate-600 bg-slate-800/80 px-3 py-2.5 text-sm text-white placeholder:text-slate-500 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500/30 disabled:opacity-60"
           />
-        </div>
-        {error && (
+        </div>        {error && (
           <p className="rounded-lg bg-rose-500/15 px-3 py-2 text-xs text-rose-200">
             {error}
           </p>

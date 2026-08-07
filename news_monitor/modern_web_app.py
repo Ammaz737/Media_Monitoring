@@ -732,6 +732,12 @@ MODERN_TEMPLATE = r"""
                                                         <option value="">All Channels</option>
                                                         <option value="News Channel 1">News Channel 1</option>
                                                         <option value="News Channel 2">News Channel 2</option>
+                                                        <option value="News Channel 3">News Channel 3</option>
+                                                        <option value="News Channel 4">News Channel 4</option>
+                                                        <option value="News Channel 5">News Channel 5</option>
+                                                        <option value="News Channel 6">News Channel 6</option>
+                                                        <option value="News Channel 7">News Channel 7</option>
+                                                        <option value="News Channel 8">News Channel 8</option>
                                                     </select>
                                                 </div>
 
@@ -2127,7 +2133,7 @@ def api_start_monitor():
             })
         else:
             # Use single channel monitoring (legacy mode)
-            rtsp_url = config.get('rtsp_url', 'rtsp://admin:gcs12345@192.168.2.145:554/Streaming/Channels/101')
+            rtsp_url = config.get('rtsp_url', 'rtsp://admin:Admin123.@192.168.2.173:554/Streaming/Channels/101')
             channel_name = config.get('channel_name', 'news_channel')
 
             # Create monitor instance (this will initialize models when needed)

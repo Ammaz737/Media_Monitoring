@@ -64,6 +64,7 @@ export function StatCard({
       {badge && (
         <div className="relative z-10 mt-4">
           <span
+            dir="ltr"
             className={cn(
               "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[0.75rem] font-semibold",
               badgeStyles[badge.variant]

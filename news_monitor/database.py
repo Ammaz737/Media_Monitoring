@@ -98,7 +98,7 @@ class NewsDatabase:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_type ON alerts(alert_type)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_read ON alerts(is_read)")
             
-            # Channel metadata table
+            # Channel metadata table (source of truth for RTSP stream configs)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS channels (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -107,11 +107,19 @@ class NewsDatabase:
                     display_name TEXT,
                     language TEXT DEFAULT 'urdu',
                     is_active BOOLEAN DEFAULT TRUE,
+                    priority TEXT DEFAULT 'medium',
                     last_seen DATETIME,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            
+            # Migrate older DBs that lack priority
+            cursor.execute("PRAGMA table_info(channels)")
+            channel_cols = {row[1] for row in cursor.fetchall()}
+            if 'priority' not in channel_cols:
+                cursor.execute(
+                    "ALTER TABLE channels ADD COLUMN priority TEXT DEFAULT 'medium'"
+                )
+
             # Statistics table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS daily_stats (
@@ -562,6 +570,165 @@ class NewsDatabase:
                 },
                 'chart_series': chart_series,
             }
+
+    def seed_rtsp_channels(self, defaults: Dict) -> int:
+        """Insert default RTSP channels when the table is empty. Returns rows inserted."""
+        if not defaults:
+            return 0
+        with self.lock:
+            try:
+                with sqlite3.connect(self.db_path) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT COUNT(*) FROM channels")
+                    if cursor.fetchone()[0] > 0:
+                        return 0
+                    inserted = 0
+                    for channel_id, cfg in defaults.items():
+                        cursor.execute(
+                            """
+                            INSERT INTO channels
+                            (channel_name, rtsp_url, display_name, is_active, priority)
+                            VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (
+                                channel_id,
+                                cfg.get('rtsp_url') or '',
+                                cfg.get('name') or channel_id,
+                                1 if cfg.get('enabled', True) else 0,
+                                cfg.get('priority') or 'medium',
+                            ),
+                        )
+                        inserted += 1
+                    conn.commit()
+                    logging.info("Seeded %s RTSP channels into database", inserted)
+                    return inserted
+            except Exception as e:
+                logging.error(f"Error seeding RTSP channels: {e}")
+                return 0
+
+    def get_rtsp_channels(self) -> Dict[str, Dict]:
+        """Load RTSP channel configs keyed by channel_name (id)."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT channel_name, display_name, rtsp_url, is_active, priority
+                FROM channels
+                ORDER BY id ASC
+                """
+            )
+            channels = {}
+            for row in cursor.fetchall():
+                cid, display_name, rtsp_url, is_active, priority = row
+                channels[cid] = {
+                    'name': display_name or cid,
+                    'rtsp_url': rtsp_url or '',
+                    'enabled': bool(is_active),
+                    'priority': priority or 'medium',
+                }
+            return channels
+
+    def create_rtsp_channel(
+        self,
+        channel_id: str,
+        name: str,
+        rtsp_url: str,
+        enabled: bool = True,
+        priority: str = 'medium',
+    ) -> bool:
+        """Insert a new RTSP channel. Returns False if id already exists."""
+        with self.lock:
+            try:
+                with sqlite3.connect(self.db_path) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        """
+                        INSERT INTO channels
+                        (channel_name, rtsp_url, display_name, is_active, priority)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            channel_id,
+                            rtsp_url,
+                            name,
+                            1 if enabled else 0,
+                            priority or 'medium',
+                        ),
+                    )
+                    conn.commit()
+                    return True
+            except sqlite3.IntegrityError:
+                return False
+            except Exception as e:
+                logging.error(f"Error creating RTSP channel: {e}")
+                return False
+
+    def update_rtsp_channel(
+        self,
+        channel_id: str,
+        *,
+        name: str = None,
+        rtsp_url: str = None,
+        enabled: bool = None,
+        priority: str = None,
+    ) -> bool:
+        """Update fields on an existing RTSP channel."""
+        with self.lock:
+            try:
+                with sqlite3.connect(self.db_path) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "SELECT display_name, rtsp_url, is_active, priority FROM channels WHERE channel_name = ?",
+                        (channel_id,),
+                    )
+                    row = cursor.fetchone()
+                    if not row:
+                        return False
+                    cur_name, cur_url, cur_active, cur_priority = row
+                    new_name = name if name is not None else cur_name
+                    new_url = rtsp_url if rtsp_url is not None else cur_url
+                    new_active = (1 if enabled else 0) if enabled is not None else cur_active
+                    new_priority = priority if priority is not None else cur_priority
+                    cursor.execute(
+                        """
+                        UPDATE channels
+                        SET display_name = ?, rtsp_url = ?, is_active = ?, priority = ?
+                        WHERE channel_name = ?
+                        """,
+                        (new_name, new_url, new_active, new_priority or 'medium', channel_id),
+                    )
+                    conn.commit()
+                    return cursor.rowcount > 0
+            except Exception as e:
+                logging.error(f"Error updating RTSP channel {channel_id}: {e}")
+                return False
+
+    def delete_rtsp_channel(self, channel_id: str) -> bool:
+        """Delete an RTSP channel by id."""
+        with self.lock:
+            try:
+                with sqlite3.connect(self.db_path) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "DELETE FROM channels WHERE channel_name = ?",
+                        (channel_id,),
+                    )
+                    conn.commit()
+                    return cursor.rowcount > 0
+            except Exception as e:
+                logging.error(f"Error deleting RTSP channel {channel_id}: {e}")
+                return False
+
+    def next_rtsp_channel_id(self, prefix: str = 'channel_') -> str:
+        """Allocate next unused channel_N id."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT channel_name FROM channels")
+            existing = {row[0] for row in cursor.fetchall()}
+        n = 1
+        while f"{prefix}{n}" in existing:
+            n += 1
+        return f"{prefix}{n}"
 
     def get_search_facets(self) -> Dict:
         """Distinct channel/region values for search filters."""

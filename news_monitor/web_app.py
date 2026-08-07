@@ -12,12 +12,12 @@ import threading
 import time
 
 from config import (
-    WEB_CONFIG, ALERTS_CONFIG, RTSP_URL, RTSP_CHANNELS,
+    WEB_CONFIG, ALERTS_CONFIG, RTSP_URL, RTSP_CHANNELS, DEFAULT_RTSP_CHANNELS,
     TEXT_REGIONS, YOUTUBE_TEXT_REGIONS, PROCESSING_CONFIG, SPEECH_CONFIG, UTRNET_CONFIG,
-    save_runtime_config,
+    save_runtime_config, AUTO_START_MONITORING, apply_rtsp_channels,
 )
 from database import NewsDatabase
-from news_monitor import NewsMonitor
+from news_monitor import NewsMonitor, MultiChannelNewsMonitor
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -69,6 +69,15 @@ except ImportError as e:
 db = NewsDatabase()
 news_monitor_instance = None
 connected_clients = set()
+
+
+def refresh_rtsp_channels_cache():
+    """Seed SQLite channels if empty, then sync in-memory RTSP_CHANNELS."""
+    db.seed_rtsp_channels(DEFAULT_RTSP_CHANNELS)
+    apply_rtsp_channels(db.get_rtsp_channels())
+
+
+refresh_rtsp_channels_cache()
 
 @app.route('/')
 def index():
@@ -299,38 +308,84 @@ def api_mark_alert_read(alert_uuid):
 
 @app.route('/api/monitor/start', methods=['POST'])
 def api_start_monitor():
-    """Start news monitoring"""
+    """Start news monitoring (multi-channel by default)."""
     try:
         global news_monitor_instance
-        
-        if news_monitor_instance and news_monitor_instance.is_running:
-            return jsonify({'error': 'Monitor is already running'}), 400
-        
-        # Get configuration from request
+
+        # Treat as running if parent flag OR any child channel is live
+        if news_monitor_instance:
+            already = bool(getattr(news_monitor_instance, 'is_running', False))
+            if isinstance(news_monitor_instance, MultiChannelNewsMonitor):
+                already = already or news_monitor_instance.any_channel_running()
+            if already:
+                return jsonify({'error': 'Monitor is already running'}), 400
+            # Stale stopped instance — clear before restart
+            try:
+                news_monitor_instance.stop_monitoring()
+            except Exception:
+                pass
+            news_monitor_instance = None
+
         config = request.get_json() or {}
-        rtsp_url = config.get('rtsp_url')
+        use_multi_channel = config.get('multi_channel', True)
+
+        if use_multi_channel:
+            refresh_rtsp_channels_cache()
+            channel_configs = {
+                cid: dict(cfg) for cid, cfg in RTSP_CHANNELS.items()
+            }
+            # Optional runtime overrides from Settings toggles
+            enabled_overrides = config.get('enabled_channels')
+            if isinstance(enabled_overrides, dict):
+                for cid, enabled in enabled_overrides.items():
+                    if cid in channel_configs:
+                        channel_configs[cid]['enabled'] = bool(enabled)
+
+            enabled_count = sum(
+                1 for c in channel_configs.values() if c.get('enabled')
+            )
+            if enabled_count == 0:
+                return jsonify({'error': 'No enabled RTSP channels'}), 400
+
+            monitor = MultiChannelNewsMonitor(channel_configs=channel_configs)
+            news_monitor_instance = monitor
+            try:
+                monitor.start_monitoring()
+            except Exception:
+                news_monitor_instance = None
+                raise
+
+            return jsonify({
+                'success': True,
+                'message': f'Multi-channel monitoring started ({enabled_count} channels)',
+                'multi_channel': True,
+                'channels': list(monitor.monitors.keys()),
+                'channel_name': 'multi_channel',
+            })
+
+        # Single-channel (legacy) mode
+        rtsp_url = config.get('rtsp_url') or RTSP_URL
         channel_name = config.get('channel_name', 'news_channel')
-        
+
         if not rtsp_url or not str(rtsp_url).strip():
             return jsonify({'error': 'rtsp_url is required'}), 400
 
-        # Create and start monitor
         monitor = NewsMonitor(rtsp_url=rtsp_url.strip(), channel_name=channel_name)
+        news_monitor_instance = monitor
         try:
             monitor.start_monitoring()
         except Exception:
             news_monitor_instance = None
             raise
 
-        news_monitor_instance = monitor
-        
         return jsonify({
             'success': True,
             'message': 'News monitoring started',
+            'multi_channel': False,
             'channel_name': channel_name,
             'source_url': monitor.source_url,
         })
-        
+
     except Exception as e:
         logging.error(f"Error starting monitor: {e}")
         news_monitor_instance = None
@@ -359,6 +414,8 @@ def api_stop_monitor():
 def api_config():
     """Read-only configuration for settings UI."""
     try:
+        refresh_rtsp_channels_cache()
+
         # Prefer live keywords from running monitor when available
         keywords = ALERTS_CONFIG.get('keywords', [])
         if news_monitor_instance and getattr(news_monitor_instance, 'alert_system', None):
@@ -383,6 +440,7 @@ def api_config():
                 'max_search_results': WEB_CONFIG['max_search_results'],
                 'results_per_page': WEB_CONFIG['results_per_page'],
             },
+            'auto_start_monitoring': AUTO_START_MONITORING,
         })
     except Exception as e:
         logging.error(f"Error getting config: {e}")
@@ -481,22 +539,173 @@ def api_monitor_status():
     try:
         if news_monitor_instance:
             stats = news_monitor_instance.get_statistics()
+            if isinstance(news_monitor_instance, MultiChannelNewsMonitor):
+                running = (
+                    bool(news_monitor_instance.is_running)
+                    or news_monitor_instance.any_channel_running()
+                )
+                return jsonify({
+                    'running': running,
+                    'multi_channel': True,
+                    'channel_name': (
+                        f"{stats.get('channels_running', 0)}/"
+                        f"{stats.get('channels_total', 0)} channels"
+                    ),
+                    'stream_error': stats.get('stream_error'),
+                    'channel_status': news_monitor_instance.get_channel_status(),
+                    'statistics': stats,
+                })
+
             return jsonify({
                 'running': news_monitor_instance.is_running,
+                'multi_channel': False,
                 'channel_name': news_monitor_instance.channel_name,
                 'source_url': news_monitor_instance.source_url,
                 'stream_error': news_monitor_instance.stream_error,
                 'statistics': stats,
             })
-        else:
-            return jsonify({
-                'running': False,
-                'channel_name': None,
-                'statistics': {}
-            })
-            
+
+        return jsonify({
+            'running': False,
+            'multi_channel': False,
+            'channel_name': None,
+            'statistics': {},
+        })
+
     except Exception as e:
         logging.error(f"Error getting monitor status: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/config/channels', methods=['POST'])
+def api_create_channel():
+    """Add a new RTSP channel (persisted in SQLite)."""
+    try:
+        body = request.get_json() or {}
+        name = (body.get('name') or '').strip()
+        rtsp_url = (body.get('rtsp_url') or '').strip()
+        priority = (body.get('priority') or 'medium').strip().lower()
+        enabled = bool(body.get('enabled', True))
+
+        if not name:
+            return jsonify({'error': 'name is required'}), 400
+        if not rtsp_url:
+            return jsonify({'error': 'rtsp_url is required'}), 400
+        if priority not in ('high', 'medium', 'low'):
+            priority = 'medium'
+
+        channel_id = (body.get('channel_id') or '').strip() or db.next_rtsp_channel_id()
+        if channel_id in RTSP_CHANNELS or channel_id in db.get_rtsp_channels():
+            return jsonify({'error': f'Channel id already exists: {channel_id}'}), 400
+
+        ok = db.create_rtsp_channel(
+            channel_id=channel_id,
+            name=name,
+            rtsp_url=rtsp_url,
+            enabled=enabled,
+            priority=priority,
+        )
+        if not ok:
+            return jsonify({'error': 'Failed to create channel'}), 500
+
+        refresh_rtsp_channels_cache()
+        cfg = dict(RTSP_CHANNELS[channel_id])
+
+        if (
+            news_monitor_instance
+            and isinstance(news_monitor_instance, MultiChannelNewsMonitor)
+            and (news_monitor_instance.is_running or news_monitor_instance.any_channel_running())
+            and enabled
+        ):
+            news_monitor_instance.add_channel(channel_id, cfg)
+
+        return jsonify({
+            'success': True,
+            'channel_id': channel_id,
+            'channel': cfg,
+            'channels': RTSP_CHANNELS,
+        }), 201
+    except Exception as e:
+        logging.error(f"Error creating channel: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/config/channels/<channel_id>', methods=['POST', 'PUT', 'DELETE'])
+def api_update_channel(channel_id):
+    """Enable/disable, update, or delete an RTSP channel."""
+    try:
+        if request.method == 'DELETE':
+            if channel_id not in db.get_rtsp_channels():
+                return jsonify({'error': 'Channel not found'}), 404
+            if not db.delete_rtsp_channel(channel_id):
+                return jsonify({'error': 'Failed to delete channel'}), 500
+            refresh_rtsp_channels_cache()
+            if (
+                news_monitor_instance
+                and isinstance(news_monitor_instance, MultiChannelNewsMonitor)
+            ):
+                news_monitor_instance.remove_channel(channel_id)
+            return jsonify({
+                'success': True,
+                'channel_id': channel_id,
+                'deleted': True,
+                'channels': RTSP_CHANNELS,
+            })
+
+        body = request.get_json() or {}
+        existing = db.get_rtsp_channels()
+        if channel_id not in existing:
+            return jsonify({'error': 'Channel not found'}), 404
+
+        updates = {}
+        if 'enabled' in body:
+            updates['enabled'] = bool(body['enabled'])
+        if 'name' in body and str(body['name']).strip():
+            updates['name'] = str(body['name']).strip()
+        if 'rtsp_url' in body and str(body['rtsp_url']).strip():
+            updates['rtsp_url'] = str(body['rtsp_url']).strip()
+        if 'priority' in body:
+            p = str(body['priority']).strip().lower()
+            if p in ('high', 'medium', 'low'):
+                updates['priority'] = p
+
+        if not updates:
+            return jsonify({'error': 'No fields to update'}), 400
+
+        if not db.update_rtsp_channel(channel_id, **updates):
+            return jsonify({'error': 'Failed to update channel'}), 500
+
+        refresh_rtsp_channels_cache()
+        cfg = dict(RTSP_CHANNELS[channel_id])
+
+        if (
+            news_monitor_instance
+            and isinstance(news_monitor_instance, MultiChannelNewsMonitor)
+        ):
+            running = (
+                news_monitor_instance.is_running
+                or news_monitor_instance.any_channel_running()
+            )
+            if 'enabled' in updates and len(updates) == 1:
+                if running:
+                    news_monitor_instance.set_channel_enabled(
+                        channel_id, updates['enabled']
+                    )
+            elif running:
+                # Name/URL/priority changed — restart channel if present
+                news_monitor_instance.remove_channel(channel_id)
+                if cfg.get('enabled'):
+                    news_monitor_instance.add_channel(channel_id, cfg)
+
+        return jsonify({
+            'success': True,
+            'channel_id': channel_id,
+            'enabled': cfg.get('enabled'),
+            'channel': cfg,
+            'channels': RTSP_CHANNELS,
+        })
+    except Exception as e:
+        logging.error(f"Error updating channel {channel_id}: {e}")
         return jsonify({'error': str(e)}), 500
 
 # WebSocket handlers for real-time updates
@@ -525,22 +734,42 @@ def send_real_time_updates():
     """Send real-time updates to connected clients"""
     while True:
         try:
-            if SOCKETIO_ENABLED and socketio and connected_clients and news_monitor_instance and news_monitor_instance.is_running:
-                # Get recent data
-                recent_extractions = db.search_text_extractions(limit=5)
-                recent_transcriptions = db.search_audio_transcriptions(limit=5)
+            monitor_alive = False
+            if news_monitor_instance:
+                monitor_alive = bool(getattr(news_monitor_instance, 'is_running', False))
+                if isinstance(news_monitor_instance, MultiChannelNewsMonitor):
+                    monitor_alive = monitor_alive or news_monitor_instance.any_channel_running()
+
+            if SOCKETIO_ENABLED and socketio and connected_clients and monitor_alive:
+                # Get recent data + DB totals so dashboard counts update live
+                recent_extractions = db.search_text_extractions(limit=10)
+                recent_transcriptions = db.search_audio_transcriptions(limit=10)
                 recent_alerts = db.get_alerts(is_read=False, limit=5)
-                
+                db_stats = db.get_statistics()
+                mon_stats = news_monitor_instance.get_statistics()
+
                 update_data = {
                     'timestamp': datetime.now().isoformat(),
                     'recent_extractions': recent_extractions,
                     'recent_transcriptions': recent_transcriptions,
                     'recent_alerts': recent_alerts,
-                    'statistics': news_monitor_instance.get_statistics()
+                    'statistics': {
+                        'database': db_stats,
+                        'monitor': mon_stats,
+                    },
                 }
-                
-                # Send to all connected clients
-                socketio.emit('real_time_update', update_data)
+
+                # Ensure datetime fields from SQLite rows are JSON-safe
+                def _json_safe(obj):
+                    if isinstance(obj, datetime):
+                        return obj.isoformat()
+                    if isinstance(obj, dict):
+                        return {k: _json_safe(v) for k, v in obj.items()}
+                    if isinstance(obj, list):
+                        return [_json_safe(v) for v in obj]
+                    return obj
+
+                socketio.emit('real_time_update', _json_safe(update_data))
             
             time.sleep(5)  # Send updates every 5 seconds
             
@@ -552,6 +781,50 @@ def send_real_time_updates():
 if SOCKETIO_ENABLED:
     update_thread = threading.Thread(target=send_real_time_updates, daemon=True)
     update_thread.start()
+
+
+def _auto_start_monitoring():
+    """Resume multi-channel RTSP monitoring after Flask restart."""
+    global news_monitor_instance
+    time.sleep(2.0)  # let the HTTP server bind first
+    try:
+        if news_monitor_instance and (
+            news_monitor_instance.is_running
+            or (
+                isinstance(news_monitor_instance, MultiChannelNewsMonitor)
+                and news_monitor_instance.any_channel_running()
+            )
+        ):
+            logging.info("Auto-start skipped — monitor already running")
+            return
+
+        refresh_rtsp_channels_cache()
+        if not any(cfg.get('enabled') for cfg in RTSP_CHANNELS.values()):
+            logging.warning("Auto-start skipped — no enabled RTSP channels")
+            return
+
+        enabled_count = sum(1 for c in RTSP_CHANNELS.values() if c.get('enabled'))
+        logging.info(
+            "Auto-starting multi-channel monitoring (%s channels)…",
+            enabled_count,
+        )
+        # Pass full channel map so Settings can enable previously-disabled channels live
+        monitor = MultiChannelNewsMonitor(
+            channel_configs={cid: dict(cfg) for cid, cfg in RTSP_CHANNELS.items()}
+        )
+        news_monitor_instance = monitor
+        monitor.start_monitoring()
+        logging.info("Auto-start: multi-channel monitoring launched")
+    except Exception as e:
+        logging.error(f"Auto-start monitoring failed: {e}")
+        news_monitor_instance = None
+
+
+if AUTO_START_MONITORING:
+    # main.py uses use_reloader=False, so this runs once per process
+    threading.Thread(
+        target=_auto_start_monitoring, daemon=True, name="auto-start-monitor"
+    ).start()
 
 if __name__ == '__main__':
     # Configure logging

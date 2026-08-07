@@ -15,7 +15,49 @@ export function getFallbackAppConfig(): AppConfig {
       channel_2: {
         name: "News Channel 2",
         rtsp_url:
-          "rtsp://admin:Admin123.@192.168.2.144:554/Streaming/Channels/401",
+          "rtsp://admin:Admin123.@192.168.2.173:554/Streaming/Channels/201",
+        enabled: true,
+        priority: "medium",
+      },
+      channel_3: {
+        name: "News Channel 3",
+        rtsp_url:
+          "rtsp://admin:Admin123.@192.168.2.173:554/Streaming/Channels/301",
+        enabled: true,
+        priority: "medium",
+      },
+      channel_4: {
+        name: "News Channel 4",
+        rtsp_url:
+          "rtsp://admin:Admin123.@192.168.2.173:554/Streaming/Channels/401",
+        enabled: true,
+        priority: "medium",
+      },
+      channel_5: {
+        name: "News Channel 5",
+        rtsp_url:
+          "rtsp://admin:Admin123.@192.168.2.173:554/Streaming/Channels/501",
+        enabled: true,
+        priority: "medium",
+      },
+      channel_6: {
+        name: "News Channel 6",
+        rtsp_url:
+          "rtsp://admin:Admin123.@192.168.2.173:554/Streaming/Channels/601",
+        enabled: true,
+        priority: "medium",
+      },
+      channel_7: {
+        name: "News Channel 7",
+        rtsp_url:
+          "rtsp://admin:Admin123.@192.168.2.173:554/Streaming/Channels/701",
+        enabled: true,
+        priority: "medium",
+      },
+      channel_8: {
+        name: "News Channel 8",
+        rtsp_url:
+          "rtsp://admin:Admin123.@192.168.2.173:554/Streaming/Channels/801",
         enabled: true,
         priority: "medium",
       },

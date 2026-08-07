@@ -16,21 +16,37 @@ UTRNET_DIR = (
 WEIGHTS_PATH = UTRNET_DIR / "best_norm_ED.pth"
 URDU_GLYPHS_PATH = UTRNET_DIR / "UrduGlyphs.txt"
 
-# RTSP Stream Configuration - Multiple Channels Support
-RTSP_CHANNELS = {
+# Seed RTSP channels — written to SQLite on first boot, then DB is source of truth.
+# Camera 192.168.2.173 — stream IDs 101, 201, ..., 801
+DEFAULT_RTSP_CHANNELS = {
     'channel_1': {
         'name': 'News Channel 1',
-        'rtsp_url': 'rtsp://admin:gcs12345@192.168.2.145:554/Streaming/Channels/101',
+        'rtsp_url': 'rtsp://admin:Admin123.@192.168.2.173:554/Streaming/Channels/101',
         'enabled': True,
         'priority': 'high'
     },
     'channel_2': {
         'name': 'News Channel 2',
-        'rtsp_url': 'rtsp://admin:Admin123.@192.168.2.144:554/Streaming/Channels/401',
+        'rtsp_url': 'rtsp://admin:Admin123.@192.168.2.173:554/Streaming/Channels/201',
         'enabled': True,
         'priority': 'medium'
-    }
+    },
+    'channel_3': {
+        'name': 'News Channel 3',
+        'rtsp_url': 'rtsp://admin:Admin123.@192.168.2.173:554/Streaming/Channels/301',
+        'enabled': True,
+        'priority': 'medium'
+    },
+    'channel_4': {
+        'name': 'News Channel 4',
+        'rtsp_url': 'rtsp://admin:Admin123.@192.168.2.173:554/Streaming/Channels/401',
+        'enabled': True,
+        'priority': 'medium'
+    },
 }
+
+# In-memory cache synced from the `channels` SQLite table at web/monitor startup.
+RTSP_CHANNELS = {cid: dict(cfg) for cid, cfg in DEFAULT_RTSP_CHANNELS.items()}
 
 # Default RTSP URL (for backward compatibility)
 RTSP_URL = RTSP_CHANNELS['channel_1']['rtsp_url']
@@ -113,6 +129,11 @@ PROCESSING_CONFIG = {
     'duplicate_text_threshold': 0.8  # Similarity threshold to avoid duplicates
 }
 
+# Auto-start RTSP monitoring when Flask boots.
+# True = monitoring begins on app start for all enabled DB channels.
+# Settings channel toggles choose which channels are eligible; Dashboard Start/Stop still works.
+AUTO_START_MONITORING = True
+
 # Speech Recognition Configuration
 SPEECH_CONFIG = {
     'enabled': True,
@@ -155,6 +176,7 @@ def load_runtime_config() -> None:
             ALERTS_CONFIG['keywords'] = cleaned
         if 'alerts_enabled' in data:
             ALERTS_CONFIG['enabled'] = bool(data['alerts_enabled'])
+        # rtsp_channels_enabled is legacy — channels now live in SQLite
     except Exception:
         pass
 
@@ -170,6 +192,24 @@ def save_runtime_config() -> None:
     }
     with open(RUNTIME_CONFIG_PATH, 'w', encoding='utf-8') as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def apply_rtsp_channels(channels: dict) -> None:
+    """Replace in-memory RTSP_CHANNELS cache (and default URL) from DB payload."""
+    global RTSP_URL
+    RTSP_CHANNELS.clear()
+    for cid, cfg in (channels or {}).items():
+        RTSP_CHANNELS[cid] = {
+            'name': str(cfg.get('name') or cid),
+            'rtsp_url': str(cfg.get('rtsp_url') or ''),
+            'enabled': bool(cfg.get('enabled', True)),
+            'priority': str(cfg.get('priority') or 'medium'),
+        }
+    if RTSP_CHANNELS:
+        first = next(iter(RTSP_CHANNELS.values()))
+        RTSP_URL = first.get('rtsp_url') or RTSP_URL
+    elif DEFAULT_RTSP_CHANNELS:
+        RTSP_URL = next(iter(DEFAULT_RTSP_CHANNELS.values())).get('rtsp_url', RTSP_URL)
 
 
 load_runtime_config()

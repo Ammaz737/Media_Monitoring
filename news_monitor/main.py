@@ -66,7 +66,10 @@ def setup_logging():
 def initialize_database():
     """Initialize database and create indices"""
     try:
+        from config import DEFAULT_RTSP_CHANNELS, apply_rtsp_channels
         db = NewsDatabase()
+        db.seed_rtsp_channels(DEFAULT_RTSP_CHANNELS)
+        apply_rtsp_channels(db.get_rtsp_channels())
         create_indices()
         logging.info("Database initialized successfully")
         return True

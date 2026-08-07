@@ -27,6 +27,7 @@ except ImportError as e:
     sys.exit(1)
 
 from config import UTRNET_CONFIG, WEIGHTS_PATH, URDU_GLYPHS_PATH, PROCESSING_CONFIG
+import threading
 
 _ARABIC_URDU_RE = re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]")
 
@@ -43,6 +44,7 @@ class UTRNetPredictor:
         self.converter = None
         self.transform = None
         self.character_set = None
+        self._infer_lock = threading.Lock()
         
         self._load_character_set()
         self._initialize_model()
@@ -283,7 +285,8 @@ class UTRNetPredictor:
                     continue
 
                 region_img = enhance_region_for_ocr(region_img)
-                text, confidence = self.predict_single(region_img)
+                with self._infer_lock:
+                    text, confidence = self.predict_single(region_img)
 
                 min_conf = region_config.get('min_confidence', 0.5)
                 if confidence >= min_conf and text.strip():

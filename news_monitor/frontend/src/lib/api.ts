@@ -181,18 +181,71 @@ export const api = {
     }>(`/api/search-audio?${q}`);
   },
 
-  startMonitor: (body?: { rtsp_url?: string; channel_name?: string }) =>
-    request<{ success: boolean; message?: string; error?: string }>(
-      "/api/monitor/start",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          rtsp_url: body?.rtsp_url ?? siteConfig.monitor.defaultRtspUrl,
-          channel_name:
-            body?.channel_name ?? siteConfig.monitor.defaultChannelName,
-        }),
-      }
-    ),
+  startMonitor: (body?: {
+    rtsp_url?: string;
+    channel_name?: string;
+    multi_channel?: boolean;
+    enabled_channels?: Record<string, boolean>;
+  }) =>
+    request<{
+      success: boolean;
+      message?: string;
+      error?: string;
+      multi_channel?: boolean;
+      channels?: string[];
+    }>("/api/monitor/start", {
+      method: "POST",
+      body: JSON.stringify({
+        multi_channel: body?.multi_channel ?? true,
+        rtsp_url: body?.rtsp_url ?? siteConfig.monitor.defaultRtspUrl,
+        channel_name:
+          body?.channel_name ?? siteConfig.monitor.defaultChannelName,
+        ...(body?.enabled_channels
+          ? { enabled_channels: body.enabled_channels }
+          : {}),
+      }),
+    }),
+
+  updateChannel: (channelId: string, enabled: boolean) =>
+    request<{
+      success: boolean;
+      channel_id: string;
+      enabled: boolean;
+      channels?: AppConfig["rtsp_channels"];
+      error?: string;
+    }>(`/api/config/channels/${channelId}`, {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    }),
+
+  createChannel: (body: {
+    name: string;
+    rtsp_url: string;
+    priority?: string;
+    enabled?: boolean;
+    channel_id?: string;
+  }) =>
+    request<{
+      success: boolean;
+      channel_id: string;
+      channel: AppConfig["rtsp_channels"][string];
+      channels: AppConfig["rtsp_channels"];
+      error?: string;
+    }>("/api/config/channels", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  deleteChannel: (channelId: string) =>
+    request<{
+      success: boolean;
+      channel_id: string;
+      deleted?: boolean;
+      channels: AppConfig["rtsp_channels"];
+      error?: string;
+    }>(`/api/config/channels/${channelId}`, {
+      method: "DELETE",
+    }),
 
   stopMonitor: () =>
     request<{ success: boolean; message?: string }>("/api/monitor/stop", {
