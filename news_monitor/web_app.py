@@ -3,7 +3,7 @@ Web Frontend Dashboard for News Monitor
 Flask-based web application for monitoring and searching news content
 """
 
-from flask import Flask, render_template, request, jsonify, Response
+from flask import Flask, render_template, request, jsonify, Response, send_file
 import json
 import logging
 from datetime import datetime, timedelta
@@ -24,6 +24,13 @@ from config import (
 from database import NewsDatabase
 from news_monitor import NewsMonitor, MultiChannelNewsMonitor
 from stream_resolver import is_youtube_url, resolve_stream_url
+from nvr_playback import (
+    extract_playback_audio_clip,
+    live_rtsp_to_playback_url,
+    new_clip_id,
+    open_playback_stream,
+    parse_clip_window,
+)
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -334,6 +341,164 @@ def api_search_audio():
         logging.error(f"Error searching audio: {e}")
         return jsonify({'error': str(e)}), 500
 
+
+@app.route('/api/tracks/clip', methods=['POST'])
+def api_tracks_clip():
+    """Extract a short audio clip from NVR playback for a channel + datetime + duration."""
+    try:
+        body = request.get_json(silent=True) or {}
+        channel_id = (body.get('channel_id') or request.args.get('channel_id') or '').strip()
+        start_raw = body.get('start') or request.args.get('start') or ''
+        duration = body.get('duration', request.args.get('duration', 30))
+
+        refresh_rtsp_channels_cache()
+        channels = db.get_rtsp_channels()
+        cfg = channels.get(channel_id) or RTSP_CHANNELS.get(channel_id)
+        if not cfg:
+            return jsonify({'error': f'Unknown channel: {channel_id}'}), 404
+
+        live_url = (cfg.get('rtsp_url') or '').strip()
+        if not live_url:
+            return jsonify({'error': 'Channel has no RTSP URL'}), 400
+        if is_youtube_url(live_url):
+            return jsonify({'error': 'NVR track playback is only for RTSP channels'}), 400
+
+        try:
+            start_dt, end_dt, duration_sec = parse_clip_window(str(start_raw), float(duration))
+            playback_url = live_rtsp_to_playback_url(live_url, start_dt, end_dt)
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
+
+        clip_id = new_clip_id()
+        clips_dir = Path(STORAGE_CONFIG['audio_clips_dir']) / 'clips'
+        out_path = clips_dir / f'{clip_id}.wav'
+
+        ok, err = extract_playback_audio_clip(
+            playback_url,
+            out_path,
+            duration=duration_sec,
+            sample_rate=int(SPEECH_CONFIG.get('sample_rate', 16000)),
+        )
+        if not ok:
+            return jsonify({
+                'error': err or 'Failed to extract clip from NVR',
+                'hint': 'Check that the NVR has a recording for this time window.',
+            }), 502
+
+        return jsonify({
+            'success': True,
+            'clip_id': clip_id,
+            'url': f'/api/tracks/clip/{clip_id}',
+            'channel_id': channel_id,
+            'channel_name': cfg.get('name') or channel_id,
+            'start': start_dt.isoformat(timespec='seconds'),
+            'end': end_dt.isoformat(timespec='seconds'),
+            'duration': duration_sec,
+        })
+    except Exception as e:
+        logging.error(f"Error extracting track clip: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/tracks/clip/<clip_id>')
+def api_tracks_clip_file(clip_id: str):
+    """Serve a previously extracted NVR audio clip."""
+    try:
+        safe_id = ''.join(c for c in clip_id if c.isalnum() or c in '-_')
+        if not safe_id or safe_id != clip_id:
+            return jsonify({'error': 'Invalid clip id'}), 400
+        path = Path(STORAGE_CONFIG['audio_clips_dir']) / 'clips' / f'{safe_id}.wav'
+        if not path.is_file():
+            return jsonify({'error': 'Clip not found'}), 404
+        return send_file(path, mimetype='audio/wav', as_attachment=False,
+                         download_name=f'{safe_id}.wav')
+    except Exception as e:
+        logging.error(f"Error serving track clip: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/tracks/stream')
+def api_tracks_stream():
+    """
+    Stream NVR playback track as fragmented MP4 (video + audio) for HTML5 <video>.
+
+    Query: channel_id, start (ISO/local), duration (seconds).
+    Proxies Hikvision /Streaming/tracks/NNN?starttime&endtime via ffmpeg.
+    """
+    try:
+        channel_id = (request.args.get('channel_id') or '').strip()
+        start_raw = request.args.get('start') or ''
+        duration = request.args.get('duration', 30, type=float)
+
+        refresh_rtsp_channels_cache()
+        channels = db.get_rtsp_channels()
+        cfg = channels.get(channel_id) or RTSP_CHANNELS.get(channel_id)
+        if not cfg:
+            return jsonify({'error': f'Unknown channel: {channel_id}'}), 404
+
+        live_url = (cfg.get('rtsp_url') or '').strip()
+        if not live_url:
+            return jsonify({'error': 'Channel has no RTSP URL'}), 400
+        if is_youtube_url(live_url):
+            return jsonify({'error': 'NVR track playback is only for RTSP channels'}), 400
+
+        try:
+            start_dt, end_dt, duration_sec = parse_clip_window(str(start_raw), float(duration))
+            playback_url = live_rtsp_to_playback_url(live_url, start_dt, end_dt)
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
+
+        logging.info(
+            "Streaming NVR track %s %s → %s (%.0fs)",
+            channel_id,
+            start_dt.isoformat(timespec='seconds'),
+            end_dt.isoformat(timespec='seconds'),
+            duration_sec,
+        )
+
+        proc = open_playback_stream(playback_url, duration_sec)
+
+        def generate():
+            try:
+                assert proc.stdout is not None
+                while True:
+                    chunk = proc.stdout.read(64 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
+                err = b''
+                try:
+                    if proc.stderr:
+                        err = proc.stderr.read() or b''
+                except Exception:
+                    pass
+                if proc.returncode not in (0, None, -9) and err:
+                    logging.warning(
+                        "NVR track stream ended rc=%s: %s",
+                        proc.returncode,
+                        err.decode(errors='ignore')[-400:],
+                    )
+
+        return Response(
+            generate(),
+            mimetype='video/mp4',
+            headers={
+                'Cache-Control': 'no-store, no-cache',
+                'X-Accel-Buffering': 'no',
+                'Content-Disposition': 'inline; filename="track.mp4"',
+            },
+        )
+    except Exception as e:
+        logging.error(f"Error streaming track: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/alerts')
 def api_alerts():
     """Get alerts"""
@@ -429,8 +594,26 @@ def api_start_monitor():
             enabled_count = sum(
                 1 for c in channel_configs.values() if c.get('enabled')
             )
+            # Start with no toggles on → re-enable every channel that has a URL
+            # (Settings may have left all is_active=0, which also blocks auto-start)
             if enabled_count == 0:
-                return jsonify({'error': 'No enabled RTSP channels'}), 400
+                restored = 0
+                for cid, cfg in channel_configs.items():
+                    if (cfg.get('rtsp_url') or '').strip():
+                        cfg['enabled'] = True
+                        db.update_rtsp_channel(cid, enabled=True)
+                        restored += 1
+                if restored:
+                    refresh_rtsp_channels_cache()
+                    enabled_count = restored
+                    logging.warning(
+                        "No enabled RTSP channels — re-enabled %s channel(s) for Start",
+                        restored,
+                    )
+                else:
+                    return jsonify({
+                        'error': 'No enabled RTSP channels. Enable at least one in Settings.'
+                    }), 400
 
             monitor = MultiChannelNewsMonitor(channel_configs=channel_configs)
             news_monitor_instance = monitor
@@ -946,6 +1129,7 @@ def _auto_start_monitoring():
     """Resume multi-channel RTSP monitoring after Flask restart."""
     global news_monitor_instance
     time.sleep(2.0)  # let the HTTP server bind first
+    monitor = None
     try:
         if news_monitor_instance and (
             news_monitor_instance.is_running
@@ -976,7 +1160,20 @@ def _auto_start_monitoring():
         logging.info("Auto-start: multi-channel monitoring launched")
     except Exception as e:
         logging.error(f"Auto-start monitoring failed: {e}")
-        news_monitor_instance = None
+        # Keep a partially started monitor referenced so /status and Stop still work
+        if monitor is not None and news_monitor_instance is monitor:
+            try:
+                if not (
+                    monitor.is_running or monitor.any_channel_running()
+                ):
+                    news_monitor_instance = None
+            except Exception:
+                news_monitor_instance = None
+        elif news_monitor_instance is None:
+            pass
+        else:
+            # Failed before assignment
+            news_monitor_instance = None
 
 
 if AUTO_START_MONITORING:

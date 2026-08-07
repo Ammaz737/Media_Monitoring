@@ -488,10 +488,10 @@ def extract_audio_from_rtsp(rtsp_url: str,
 
         command = ['ffmpeg', '-hide_banner', '-nostdin']
         if is_rtsp:
-            # TCP + short timeouts reduce demux hangs on flaky camera links
+            # TCP reduces demux hangs on flaky camera links
+            # (rw_timeout is not supported by all ffmpeg builds)
             command.extend([
                 '-rtsp_transport', 'tcp',
-                '-rw_timeout', '5000000',  # 5s (microseconds)
                 '-fflags', '+genpts+discardcorrupt',
             ])
         else:

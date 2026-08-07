@@ -804,6 +804,8 @@ class MultiChannelNewsMonitor:
         self.monitors = {}
         self.is_running = False
         self.alert_system = AlertSystem(self.database)
+        # Channel id that owns the shared Whisper / audio-capture thread
+        self._speech_channel_id: Optional[str] = None
 
         # Initialize monitors for enabled channels
         self._initialize_monitors()
@@ -892,18 +894,8 @@ class MultiChannelNewsMonitor:
                 )
 
                 # Audio AFTER all OCR models are loaded (prevents GPU OOM crash)
-                if self.is_running and first_ready and SPEECH_CONFIG.get('enabled', True):
-                    logging.info(
-                        "Starting deferred speech on %s…", first_ready.channel_name
-                    )
-                    try:
-                        ok = first_ready.start_speech_transcription()
-                        if ok:
-                            logging.info("Audio transcription active on %s", first_ready.channel_name)
-                        else:
-                            logging.warning("Audio transcription failed to start")
-                    except Exception as e:
-                        logging.warning("Audio transcription skipped: %s", e)
+                if self.is_running and SPEECH_CONFIG.get('enabled', True):
+                    self._ensure_speech(preferred=first_ready)
 
             except Exception as e:
                 logging.error(f"Multi-channel boot error: {e}")
@@ -1037,12 +1029,56 @@ class MultiChannelNewsMonitor:
 
         return status
 
+    def _speech_host_alive(self) -> bool:
+        """True if the current speech host still has a live audio thread."""
+        if not self._speech_channel_id:
+            return False
+        mon = self.monitors.get(self._speech_channel_id)
+        if not mon or not mon.is_running:
+            return False
+        thread = getattr(mon, 'audio_thread', None)
+        return bool(thread and thread.is_alive() and mon.speech_transcriber)
+
+    def _ensure_speech(self, preferred: Optional["NewsMonitor"] = None) -> bool:
+        """Start (or fail over) shared speech on one running channel."""
+        if not SPEECH_CONFIG.get('enabled', True):
+            return False
+        if self._speech_host_alive():
+            return True
+
+        self._speech_channel_id = None
+        candidates: List["NewsMonitor"] = []
+        if preferred is not None and preferred.is_running:
+            candidates.append(preferred)
+        for cid, mon in self.monitors.items():
+            if preferred is not None and mon is preferred:
+                continue
+            if mon.is_running and self.channel_configs.get(cid, {}).get('enabled', True):
+                candidates.append(mon)
+
+        for mon in candidates:
+            try:
+                logging.info("Starting deferred speech on %s…", mon.channel_name)
+                if mon.start_speech_transcription():
+                    for cid, m in self.monitors.items():
+                        if m is mon:
+                            self._speech_channel_id = cid
+                            break
+                    logging.info("Audio transcription active on %s", mon.channel_name)
+                    return True
+                logging.warning("Audio transcription failed to start on %s", mon.channel_name)
+            except Exception as e:
+                logging.warning("Audio transcription skipped on %s: %s", mon.channel_name, e)
+        logging.warning("No channel available for audio transcription")
+        return False
+
     def set_channel_enabled(self, channel_id: str, enabled: bool) -> bool:
         """Enable/disable a channel at runtime (starts/stops its monitor)."""
         if channel_id not in self.channel_configs:
             return False
 
         self.channel_configs[channel_id]['enabled'] = enabled
+        was_speech_host = self._speech_channel_id == channel_id
 
         if enabled:
             if channel_id not in self.monitors:
@@ -1055,10 +1091,17 @@ class MultiChannelNewsMonitor:
                 )
             if self.is_running and not self.monitors[channel_id].is_running:
                 self.monitors[channel_id].start_monitoring()
+            if self.is_running and not self._speech_host_alive():
+                self._ensure_speech(preferred=self.monitors.get(channel_id))
         else:
             monitor = self.monitors.get(channel_id)
             if monitor and monitor.is_running:
                 monitor.stop_monitoring()
+            if was_speech_host:
+                self._speech_channel_id = None
+                if self.is_running:
+                    # Keep transcription alive on another enabled channel
+                    self._ensure_speech()
 
         return True
 

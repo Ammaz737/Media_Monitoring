@@ -25,8 +25,36 @@ function getApiBase(): string {
   ).replace(/\/$/, "");
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const base = getApiBase();
+/** Direct Flask origin — used for long-running / streaming requests (avoid Next proxy timeout). */
+export function getFlaskDirectBase(): string {
+  const explicit =
+    process.env.NEXT_PUBLIC_API_URL?.trim() ||
+    process.env.INTERNAL_API_URL?.trim() ||
+    process.env.FLASK_API_URL?.trim();
+  if (explicit) return explicit.replace(/\/$/, "");
+  return "http://127.0.0.1:5000";
+}
+
+/** NVR playback RTSP → browser MP4 stream URL (video + audio). */
+export function getTrackStreamUrl(params: {
+  channel_id: string;
+  start: string;
+  duration: number;
+}): string {
+  const q = new URLSearchParams({
+    channel_id: params.channel_id,
+    start: params.start,
+    duration: String(params.duration),
+  });
+  return `${getFlaskDirectBase()}/api/tracks/stream?${q}`;
+}
+
+async function request<T>(
+  path: string,
+  init?: RequestInit,
+  opts?: { baseUrl?: string }
+): Promise<T> {
+  const base = opts?.baseUrl ?? getApiBase();
   const url = `${base}${path}`;
 
   let res: Response;
@@ -50,13 +78,19 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const msg = (data as { error?: string }).error;
+    const msg = (data as { error?: string; hint?: string }).error;
+    const extra = (data as { hint?: string }).hint;
     if (res.status === 404) {
       throw new Error(
         msg ?? `HTTP 404 — endpoint not found. Restart Flask: python main.py --mode web`
       );
     }
-    throw new Error(msg ?? `HTTP ${res.status}`);
+    const detail = msg
+      ? extra
+        ? `${msg} ${extra}`
+        : msg
+      : `HTTP ${res.status}`;
+    throw new Error(detail);
   }
   return data as T;
 }
@@ -292,4 +326,33 @@ export const api = {
     request<{ success: boolean; message?: string }>("/api/monitor/stop", {
       method: "POST",
     }),
+
+  extractTrackClip: async (body: {
+    channel_id: string;
+    start: string;
+    duration: number;
+  }) => {
+    // Bypass Next.js rewrite — 30s+ NVR pulls hit the default ~30s proxy timeout (HTTP 500).
+    const res = await request<{
+      success: boolean;
+      clip_id: string;
+      url: string;
+      channel_id: string;
+      channel_name: string;
+      start: string;
+      end: string;
+      duration: number;
+      error?: string;
+      hint?: string;
+    }>(
+      "/api/tracks/clip",
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+      },
+      { baseUrl: getFlaskDirectBase() }
+    );
+    // Serve the wav via same-origin rewrite (fast GET); keep relative path for <audio>.
+    return res;
+  },
 };

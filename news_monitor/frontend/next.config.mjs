@@ -3,6 +3,10 @@ const FLASK_API = process.env.FLASK_API_URL ?? "http://127.0.0.1:5000";
 
 const nextConfig = {
   reactStrictMode: true,
+  // NVR clip extract can take longer than the default ~30s proxy window
+  experimental: {
+    proxyTimeout: 120_000,
+  },
   async rewrites() {
     return [
       {

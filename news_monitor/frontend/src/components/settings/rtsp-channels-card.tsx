@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogFooter } from "@/components/ui/dialog";
 import { RegionEditorDialog } from "@/components/settings/region-editor-dialog";
+import { TrackPlayerDialog } from "@/components/settings/track-player-dialog";
 import { cn } from "@/lib/utils";
 import type { RtspChannelConfig, TextRegionMap } from "@/lib/types";
 
@@ -61,6 +62,10 @@ export function RtspChannelsCard({
     id: string;
     name: string;
     regions?: TextRegionMap | null;
+  } | null>(null);
+  const [trackPlay, setTrackPlay] = useState<{
+    id: string;
+    name: string;
   } | null>(null);
 
   const resetForm = () => {
@@ -242,23 +247,38 @@ export function RtspChannelsCard({
                     <p className="break-all font-mono text-[11px] leading-relaxed text-slate-500">
                       {ch.rtsp_url}
                     </p>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      className="mt-1 h-8 text-xs"
-                      disabled={busy}
-                      onClick={() =>
-                        setRegionEdit({
-                          id,
-                          name: ch.name,
-                          regions: ch.text_regions,
-                        })
-                      }
-                    >
-                      <Scan className="h-3.5 w-3.5" />
-                      Edit OCR regions
-                    </Button>
+                    <div className="mt-1 flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="h-8 text-xs"
+                        disabled={busy}
+                        onClick={() =>
+                          setRegionEdit({
+                            id,
+                            name: ch.name,
+                            regions: ch.text_regions,
+                          })
+                        }
+                      >
+                        <Scan className="h-3.5 w-3.5" />
+                        Edit OCR regions
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="h-8 text-xs"
+                        disabled={busy}
+                        onClick={() =>
+                          setTrackPlay({ id, name: ch.name })
+                        }
+                      >
+                        <Video className="h-3.5 w-3.5" />
+                        Play track
+                      </Button>
+                    </div>
                   </div>
 
                   <div className="flex shrink-0 flex-col items-center gap-1.5 border-s border-slate-100 ps-4">
@@ -350,6 +370,17 @@ export function RtspChannelsCard({
             onChannelsUpdated?.(next as Record<string, RtspChannel>);
             setRegionEdit(null);
           }}
+        />
+      )}
+
+      {trackPlay && (
+        <TrackPlayerDialog
+          open={trackPlay !== null}
+          onOpenChange={(open) => {
+            if (!open) setTrackPlay(null);
+          }}
+          channelId={trackPlay.id}
+          channelName={trackPlay.name}
         />
       )}
     </SectionCard>
