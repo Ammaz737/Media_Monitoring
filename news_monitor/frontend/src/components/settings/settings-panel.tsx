@@ -149,6 +149,10 @@ export function SettingsPanel() {
           channelEnabled={channelEnabled}
           busy={channelBusy}
           statusMessage={channelStatus}
+          onChannelsUpdated={(channels) => {
+            applyChannels(channels);
+            setChannelStatus("OCR regions saved");
+          }}
           onToggle={async (id, enabled) => {
             setChannelEnabled((prev) => ({ ...prev, [id]: enabled }));
             if (usingFallback) return;
@@ -222,6 +226,12 @@ export function SettingsPanel() {
           icon={<Layers className="h-5 w-5 text-primary" />}
           accent="purple"
         >
+          <p className="mb-4 text-sm text-slate-500">
+            Default layout used when a channel has no custom boxes. Use{" "}
+            <span className="font-medium text-slate-700">Edit OCR regions</span>{" "}
+            on each RTSP channel to draw ticker / headline / side over a live
+            frame.
+          </p>
           <div className="space-y-3">
             {Object.entries(config.text_regions).map(([key, r]) => (
               <div

@@ -98,16 +98,30 @@ export interface MonitorStatusResponse {
   statistics: MonitorStats;
 }
 
+export interface TextRegionDef {
+  name: string;
+  region: number[];
+  priority: string;
+  min_confidence: number;
+}
+
+export type TextRegionMap = Record<string, TextRegionDef>;
+
+export interface RtspChannelConfig {
+  name: string;
+  rtsp_url: string;
+  enabled: boolean;
+  priority: string;
+  text_regions?: TextRegionMap;
+  has_custom_regions?: boolean;
+}
+
 export interface AppConfig {
   rtsp_url: string;
-  rtsp_channels: Record<
-    string,
-    { name: string; rtsp_url: string; enabled: boolean; priority: string }
-  >;
-  text_regions: Record<
-    string,
-    { name: string; region: number[]; priority: string; min_confidence: number }
-  >;
+  rtsp_channels: Record<string, RtspChannelConfig>;
+  default_text_regions?: TextRegionMap;
+  youtube_text_regions?: TextRegionMap;
+  text_regions: TextRegionMap;
   processing: Record<string, number | boolean>;
   speech: Record<string, unknown>;
   utrnet: Record<string, unknown>;

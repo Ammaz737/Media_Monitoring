@@ -1,20 +1,18 @@
 "use client";
 
 import { useState } from "react";
-import { Plus, Radio, Trash2, Video } from "lucide-react";
+import { Plus, Radio, Trash2, Video, Scan } from "lucide-react";
 import { SectionCard } from "@/components/ui/section-card";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogFooter } from "@/components/ui/dialog";
+import { RegionEditorDialog } from "@/components/settings/region-editor-dialog";
 import { cn } from "@/lib/utils";
+import type { RtspChannelConfig, TextRegionMap } from "@/lib/types";
 
-export interface RtspChannel {
-  name: string;
-  rtsp_url: string;
-  enabled: boolean;
-  priority: string;
-}
+export type RtspChannel = RtspChannelConfig;
 
 export interface NewRtspChannelInput {
   name: string;
@@ -30,6 +28,7 @@ interface RtspChannelsCardProps {
   onToggle: (id: string, enabled: boolean) => void;
   onAdd?: (channel: NewRtspChannelInput) => Promise<boolean | void>;
   onDelete?: (id: string) => Promise<void>;
+  onChannelsUpdated?: (channels: Record<string, RtspChannel>) => void;
   busy?: boolean;
   statusMessage?: string | null;
 }
@@ -44,6 +43,7 @@ export function RtspChannelsCard({
   onToggle,
   onAdd,
   onDelete,
+  onChannelsUpdated,
   busy = false,
   statusMessage,
 }: RtspChannelsCardProps) {
@@ -52,6 +52,16 @@ export function RtspChannelsCard({
   const [name, setName] = useState("");
   const [rtspUrl, setRtspUrl] = useState(defaultUrl || "");
   const [priority, setPriority] = useState("medium");
+  const [pendingDelete, setPendingDelete] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [regionEdit, setRegionEdit] = useState<{
+    id: string;
+    name: string;
+    regions?: TextRegionMap | null;
+  } | null>(null);
 
   const resetForm = () => {
     setName("");
@@ -72,6 +82,17 @@ export function RtspChannelsCard({
       enabled: true,
     });
     if (ok !== false) resetForm();
+  };
+
+  const confirmDelete = async () => {
+    if (!pendingDelete || !onDelete || deleting) return;
+    setDeleting(true);
+    try {
+      await onDelete(pendingDelete.id);
+      setPendingDelete(null);
+    } finally {
+      setDeleting(false);
+    }
   };
 
   return (
@@ -184,7 +205,7 @@ export function RtspChannelsCard({
                     <Video className="h-5 w-5" />
                   </div>
 
-                  <div className="min-w-0 flex-1 space-y-2">
+                    <div className="min-w-0 flex-1 space-y-2">
                     <div className="flex flex-wrap items-center gap-2">
                       <h4 className="text-sm font-semibold text-slate-900">
                         {ch.name}
@@ -211,10 +232,33 @@ export function RtspChannelsCard({
                         />
                         {enabled ? "Enabled" : "Disabled"}
                       </span>
+                      {ch.has_custom_regions && (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-2 py-0.5 text-[10px] font-medium text-sky-700">
+                          <Scan className="h-3 w-3" />
+                          Custom OCR
+                        </span>
+                      )}
                     </div>
                     <p className="break-all font-mono text-[11px] leading-relaxed text-slate-500">
                       {ch.rtsp_url}
                     </p>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="mt-1 h-8 text-xs"
+                      disabled={busy}
+                      onClick={() =>
+                        setRegionEdit({
+                          id,
+                          name: ch.name,
+                          regions: ch.text_regions,
+                        })
+                      }
+                    >
+                      <Scan className="h-3.5 w-3.5" />
+                      Edit OCR regions
+                    </Button>
                   </div>
 
                   <div className="flex shrink-0 flex-col items-center gap-1.5 border-s border-slate-100 ps-4">
@@ -236,8 +280,10 @@ export function RtspChannelsCard({
                         size="icon"
                         variant="ghost"
                         className="mt-1 h-8 w-8 text-slate-400 hover:text-rose"
-                        onClick={() => onDelete(id)}
-                        disabled={busy}
+                        onClick={() =>
+                          setPendingDelete({ id, name: ch.name })
+                        }
+                        disabled={busy || deleting}
                         aria-label={`Delete ${ch.name}`}
                       >
                         <Trash2 className="h-4 w-4" />
@@ -250,6 +296,62 @@ export function RtspChannelsCard({
           })}
         </div>
       </div>
+
+      <Dialog
+        open={pendingDelete !== null}
+        onOpenChange={(open) => {
+          if (!open && !deleting) setPendingDelete(null);
+        }}
+        className="max-w-md p-6"
+      >
+        <div className="pe-8">
+          <h3 className="text-lg font-semibold text-slate-900">
+            Delete channel?
+          </h3>
+          <p className="mt-2 text-sm leading-relaxed text-slate-600">
+            Remove{" "}
+            <span className="font-semibold text-slate-900">
+              {pendingDelete?.name}
+            </span>{" "}
+            from monitoring? This cannot be undone.
+          </p>
+        </div>
+        <DialogFooter className="gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => setPendingDelete(null)}
+            disabled={deleting}
+          >
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            variant="destructive"
+            onClick={confirmDelete}
+            disabled={deleting}
+          >
+            <Trash2 className="h-4 w-4" />
+            {deleting ? "Deleting…" : "Delete"}
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      {regionEdit && (
+        <RegionEditorDialog
+          open={regionEdit !== null}
+          onOpenChange={(open) => {
+            if (!open) setRegionEdit(null);
+          }}
+          channelId={regionEdit.id}
+          channelName={regionEdit.name}
+          initialRegions={regionEdit.regions}
+          onSaved={(next) => {
+            onChannelsUpdated?.(next as Record<string, RtspChannel>);
+            setRegionEdit(null);
+          }}
+        />
+      )}
     </SectionCard>
   );
 }

@@ -199,17 +199,75 @@ def apply_rtsp_channels(channels: dict) -> None:
     global RTSP_URL
     RTSP_CHANNELS.clear()
     for cid, cfg in (channels or {}).items():
-        RTSP_CHANNELS[cid] = {
+        entry = {
             'name': str(cfg.get('name') or cid),
             'rtsp_url': str(cfg.get('rtsp_url') or ''),
             'enabled': bool(cfg.get('enabled', True)),
             'priority': str(cfg.get('priority') or 'medium'),
         }
+        regions = cfg.get('text_regions')
+        if isinstance(regions, dict) and regions:
+            entry['text_regions'] = regions
+        RTSP_CHANNELS[cid] = entry
     if RTSP_CHANNELS:
         first = next(iter(RTSP_CHANNELS.values()))
         RTSP_URL = first.get('rtsp_url') or RTSP_URL
     elif DEFAULT_RTSP_CHANNELS:
         RTSP_URL = next(iter(DEFAULT_RTSP_CHANNELS.values())).get('rtsp_url', RTSP_URL)
+
+
+def default_text_regions_for_url(url: str = '') -> dict:
+    """Return a deep copy of the default region map for a stream URL."""
+    import copy
+    if url and str(url).lower().startswith(('http://', 'https://', 'yt:')):
+        # YouTube detection is more precise in news_monitor; use RTSP defaults here
+        # unless clearly a youtube host.
+        low = str(url).lower()
+        if 'youtube.com' in low or 'youtu.be' in low:
+            return copy.deepcopy(YOUTUBE_TEXT_REGIONS)
+    return copy.deepcopy(TEXT_REGIONS)
+
+
+def normalize_text_regions(regions: dict, fallback: dict = None) -> dict:
+    """Validate / clamp fractional region boxes; keep known keys + metadata."""
+    import copy
+    base = copy.deepcopy(fallback or TEXT_REGIONS)
+    if not isinstance(regions, dict):
+        return base
+
+    out = copy.deepcopy(base)
+    for key, cfg in regions.items():
+        if not isinstance(cfg, dict):
+            continue
+        region = cfg.get('region')
+        if not isinstance(region, (list, tuple)) or len(region) != 4:
+            continue
+        try:
+            x1, y1, x2, y2 = [float(v) for v in region]
+        except (TypeError, ValueError):
+            continue
+        x1 = max(0.0, min(1.0, x1))
+        y1 = max(0.0, min(1.0, y1))
+        x2 = max(0.0, min(1.0, x2))
+        y2 = max(0.0, min(1.0, y2))
+        if x2 - x1 < 0.02:
+            x2 = min(1.0, x1 + 0.02)
+        if y2 - y1 < 0.02:
+            y2 = min(1.0, y1 + 0.02)
+        template = out.get(key) or base.get(key) or {
+            'name': str(cfg.get('name') or key),
+            'priority': 'medium',
+            'min_confidence': 0.6,
+        }
+        out[key] = {
+            'name': str(cfg.get('name') or template.get('name') or key),
+            'region': [round(x1, 4), round(y1, 4), round(x2, 4), round(y2, 4)],
+            'priority': str(cfg.get('priority') or template.get('priority') or 'medium'),
+            'min_confidence': float(
+                cfg.get('min_confidence', template.get('min_confidence', 0.6))
+            ),
+        }
+    return out
 
 
 load_runtime_config()
@@ -221,7 +279,7 @@ WEB_CONFIG = {
     'debug': False,  # Disable debug mode for production
     'secret_key': 'your-secret-key-change-this',
     'max_search_results': 1000,
-    'results_per_page': 50
+    'results_per_page': 1000
 }
 
 # Logging Configuration

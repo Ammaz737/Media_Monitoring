@@ -218,6 +218,47 @@ export const api = {
       body: JSON.stringify({ enabled }),
     }),
 
+  updateChannelRegions: (
+    channelId: string,
+    text_regions: AppConfig["rtsp_channels"][string]["text_regions"] | null
+  ) =>
+    request<{
+      success: boolean;
+      channel_id: string;
+      channel: AppConfig["rtsp_channels"][string];
+      channels: AppConfig["rtsp_channels"];
+      error?: string;
+    }>(`/api/config/channels/${channelId}`, {
+      method: "POST",
+      body: JSON.stringify({ text_regions }),
+    }),
+
+  getChannelSnapshot: async (channelId: string) => {
+    const base = getApiBase();
+    const url = `${base}/api/config/channels/${encodeURIComponent(channelId)}/snapshot`;
+    let res: Response;
+    try {
+      res = await fetch(url, { cache: "no-store" });
+    } catch (err) {
+      throw new Error(
+        `Network error loading snapshot (${err instanceof Error ? err.message : "Failed to fetch"})`
+      );
+    }
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(
+        (data as { error?: string }).error ?? `HTTP ${res.status}`
+      );
+    }
+    const blob = await res.blob();
+    return {
+      url: URL.createObjectURL(blob),
+      width: Number(res.headers.get("X-Frame-Width") || 0),
+      height: Number(res.headers.get("X-Frame-Height") || 0),
+      source: res.headers.get("X-Snapshot-Source") || "unknown",
+    };
+  },
+
   createChannel: (body: {
     name: string;
     rtsp_url: string;

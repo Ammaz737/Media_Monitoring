@@ -51,7 +51,7 @@ export function Dialog({ open, onOpenChange, children, className }: DialogProps)
         <Button
           variant="ghost"
           size="icon"
-          className="absolute end-4 top-4 text-slate-500"
+          className="absolute end-4 top-4 z-20 text-slate-500 hover:text-slate-800"
           onClick={() => onOpenChange(false)}
         >
           <X className="h-5 w-5" />

@@ -112,12 +112,16 @@ class NewsDatabase:
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            # Migrate older DBs that lack priority
+            # Migrate older DBs that lack priority / text_regions
             cursor.execute("PRAGMA table_info(channels)")
             channel_cols = {row[1] for row in cursor.fetchall()}
             if 'priority' not in channel_cols:
                 cursor.execute(
                     "ALTER TABLE channels ADD COLUMN priority TEXT DEFAULT 'medium'"
+                )
+            if 'text_regions' not in channel_cols:
+                cursor.execute(
+                    "ALTER TABLE channels ADD COLUMN text_regions TEXT"
                 )
 
             # Statistics table
@@ -612,19 +616,28 @@ class NewsDatabase:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT channel_name, display_name, rtsp_url, is_active, priority
+                SELECT channel_name, display_name, rtsp_url, is_active, priority, text_regions
                 FROM channels
                 ORDER BY id ASC
                 """
             )
             channels = {}
             for row in cursor.fetchall():
-                cid, display_name, rtsp_url, is_active, priority = row
+                cid, display_name, rtsp_url, is_active, priority, text_regions = row
+                regions = None
+                if text_regions:
+                    try:
+                        parsed = json.loads(text_regions)
+                        if isinstance(parsed, dict) and parsed:
+                            regions = parsed
+                    except Exception:
+                        regions = None
                 channels[cid] = {
                     'name': display_name or cid,
                     'rtsp_url': rtsp_url or '',
                     'enabled': bool(is_active),
                     'priority': priority or 'medium',
+                    'text_regions': regions,
                 }
             return channels
 
@@ -635,17 +648,23 @@ class NewsDatabase:
         rtsp_url: str,
         enabled: bool = True,
         priority: str = 'medium',
+        text_regions: Dict = None,
     ) -> bool:
         """Insert a new RTSP channel. Returns False if id already exists."""
         with self.lock:
             try:
                 with sqlite3.connect(self.db_path) as conn:
                     cursor = conn.cursor()
+                    regions_json = (
+                        json.dumps(text_regions, ensure_ascii=False)
+                        if text_regions
+                        else None
+                    )
                     cursor.execute(
                         """
                         INSERT INTO channels
-                        (channel_name, rtsp_url, display_name, is_active, priority)
-                        VALUES (?, ?, ?, ?, ?)
+                        (channel_name, rtsp_url, display_name, is_active, priority, text_regions)
+                        VALUES (?, ?, ?, ?, ?, ?)
                         """,
                         (
                             channel_id,
@@ -653,6 +672,7 @@ class NewsDatabase:
                             name,
                             1 if enabled else 0,
                             priority or 'medium',
+                            regions_json,
                         ),
                     )
                     conn.commit()
@@ -671,6 +691,8 @@ class NewsDatabase:
         rtsp_url: str = None,
         enabled: bool = None,
         priority: str = None,
+        text_regions: Dict = None,
+        clear_text_regions: bool = False,
     ) -> bool:
         """Update fields on an existing RTSP channel."""
         with self.lock:
@@ -678,24 +700,41 @@ class NewsDatabase:
                 with sqlite3.connect(self.db_path) as conn:
                     cursor = conn.cursor()
                     cursor.execute(
-                        "SELECT display_name, rtsp_url, is_active, priority FROM channels WHERE channel_name = ?",
+                        """
+                        SELECT display_name, rtsp_url, is_active, priority, text_regions
+                        FROM channels WHERE channel_name = ?
+                        """,
                         (channel_id,),
                     )
                     row = cursor.fetchone()
                     if not row:
                         return False
-                    cur_name, cur_url, cur_active, cur_priority = row
+                    cur_name, cur_url, cur_active, cur_priority, cur_regions = row
                     new_name = name if name is not None else cur_name
                     new_url = rtsp_url if rtsp_url is not None else cur_url
                     new_active = (1 if enabled else 0) if enabled is not None else cur_active
                     new_priority = priority if priority is not None else cur_priority
+                    if clear_text_regions:
+                        new_regions = None
+                    elif text_regions is not None:
+                        new_regions = json.dumps(text_regions, ensure_ascii=False)
+                    else:
+                        new_regions = cur_regions
                     cursor.execute(
                         """
                         UPDATE channels
-                        SET display_name = ?, rtsp_url = ?, is_active = ?, priority = ?
+                        SET display_name = ?, rtsp_url = ?, is_active = ?, priority = ?,
+                            text_regions = ?
                         WHERE channel_name = ?
                         """,
-                        (new_name, new_url, new_active, new_priority or 'medium', channel_id),
+                        (
+                            new_name,
+                            new_url,
+                            new_active,
+                            new_priority or 'medium',
+                            new_regions,
+                            channel_id,
+                        ),
                     )
                     conn.commit()
                     return cursor.rowcount > 0

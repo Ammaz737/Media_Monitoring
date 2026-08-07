@@ -104,7 +104,7 @@ export function getFallbackAppConfig(): AppConfig {
     },
     web: {
       max_search_results: 1000,
-      results_per_page: 50,
+      results_per_page: 1000,
     },
   };
 }

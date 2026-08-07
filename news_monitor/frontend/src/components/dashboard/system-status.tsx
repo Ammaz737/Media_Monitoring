@@ -86,7 +86,7 @@ export function SystemStatus({
       </div>
 
       {/* Stream URL input */}
-      <div className="mb-5 space-y-3">
+      {/* <div className="mb-5 space-y-3">
         <div>
           <label
             htmlFor="stream-url"
@@ -147,7 +147,7 @@ export function SystemStatus({
             Waiting for first frame… YouTube may take 10–20 sec
           </p>
         )}
-      </div>
+      </div> */}
 
       <div className="mb-6 grid grid-cols-2 gap-6">
         <div>

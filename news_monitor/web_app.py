@@ -7,17 +7,23 @@ from flask import Flask, render_template, request, jsonify, Response
 import json
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 import threading
 import time
+from pathlib import Path
+
+import cv2
+import numpy as np
 
 from config import (
     WEB_CONFIG, ALERTS_CONFIG, RTSP_URL, RTSP_CHANNELS, DEFAULT_RTSP_CHANNELS,
     TEXT_REGIONS, YOUTUBE_TEXT_REGIONS, PROCESSING_CONFIG, SPEECH_CONFIG, UTRNET_CONFIG,
-    save_runtime_config, AUTO_START_MONITORING, apply_rtsp_channels,
+    STORAGE_CONFIG, save_runtime_config, AUTO_START_MONITORING, apply_rtsp_channels,
+    normalize_text_regions, default_text_regions_for_url,
 )
 from database import NewsDatabase
 from news_monitor import NewsMonitor, MultiChannelNewsMonitor
+from stream_resolver import is_youtube_url, resolve_stream_url
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -75,6 +81,83 @@ def refresh_rtsp_channels_cache():
     """Seed SQLite channels if empty, then sync in-memory RTSP_CHANNELS."""
     db.seed_rtsp_channels(DEFAULT_RTSP_CHANNELS)
     apply_rtsp_channels(db.get_rtsp_channels())
+
+
+def channels_for_api() -> Dict:
+    """RTSP channels with effective text_regions (custom or defaults)."""
+    out = {}
+    for cid, cfg in RTSP_CHANNELS.items():
+        entry = dict(cfg)
+        custom = cfg.get('text_regions')
+        fallback = default_text_regions_for_url(cfg.get('rtsp_url') or '')
+        if is_youtube_url(cfg.get('rtsp_url') or ''):
+            fallback = {**YOUTUBE_TEXT_REGIONS}
+        entry['text_regions'] = (
+            normalize_text_regions(custom, fallback)
+            if custom
+            else normalize_text_regions(fallback, fallback)
+        )
+        entry['has_custom_regions'] = bool(custom)
+        out[cid] = entry
+    return out
+
+
+def _grab_rtsp_frame(rtsp_url: str, timeout_sec: float = 12.0) -> Optional[np.ndarray]:
+    """Grab a single BGR frame from an RTSP/HTTP stream."""
+    url = (rtsp_url or '').strip()
+    if not url:
+        return None
+    try:
+        resolved, err = resolve_stream_url(url)
+        if err:
+            logging.warning("Snapshot resolve failed: %s", err)
+        else:
+            url = resolved
+    except Exception as e:
+        logging.warning("Snapshot resolve error: %s", e)
+
+    cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+    if not cap.isOpened():
+        cap.release()
+        return None
+    try:
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        deadline = time.time() + timeout_sec
+        best = None
+        for _ in range(10):
+            if time.time() > deadline:
+                break
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                best = frame
+                # Prefer a later frame once the stream has warmed up
+                if _ >= 2:
+                    break
+            time.sleep(0.12)
+        return best
+    finally:
+        cap.release()
+
+
+def _latest_screenshot_for_channel(display_name: str) -> Optional[Path]:
+    """Find newest OCR screenshot matching this channel display name."""
+    shots_dir = Path(STORAGE_CONFIG['screenshots_dir'])
+    if not shots_dir.exists():
+        return None
+    suffix = f"_{display_name}.jpg"
+    candidates = sorted(
+        [p for p in shots_dir.glob("*.jpg") if p.name.endswith(suffix)],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
+def _encode_jpeg(frame: np.ndarray, quality: int = 82) -> bytes:
+    ok, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    if not ok:
+        raise RuntimeError('JPEG encode failed')
+    return buf.tobytes()
 
 
 refresh_rtsp_channels_cache()
@@ -180,6 +263,7 @@ def api_search_text():
         region = request.args.get('region')
         min_confidence = request.args.get('min_confidence', type=float)
         limit = request.args.get('limit', WEB_CONFIG['results_per_page'], type=int)
+        limit = max(1, min(int(limit or 1000), WEB_CONFIG['max_search_results']))
         
         # Parse dates
         start_datetime = None
@@ -220,6 +304,7 @@ def api_search_audio():
         channel = request.args.get('channel')
         min_confidence = request.args.get('min_confidence', type=float)
         limit = request.args.get('limit', WEB_CONFIG['results_per_page'], type=int)
+        limit = max(1, min(int(limit or 1000), WEB_CONFIG['max_search_results']))
         
         # Parse dates
         start_datetime = None
@@ -426,7 +511,9 @@ def api_config():
 
         return jsonify({
             'rtsp_url': RTSP_URL,
-            'rtsp_channels': RTSP_CHANNELS,
+            'rtsp_channels': channels_for_api(),
+            'default_text_regions': TEXT_REGIONS,
+            'youtube_text_regions': YOUTUBE_TEXT_REGIONS,
             'text_regions': text_regions,
             'processing': PROCESSING_CONFIG,
             'speech': SPEECH_CONFIG,
@@ -609,7 +696,7 @@ def api_create_channel():
             return jsonify({'error': 'Failed to create channel'}), 500
 
         refresh_rtsp_channels_cache()
-        cfg = dict(RTSP_CHANNELS[channel_id])
+        cfg = dict(channels_for_api().get(channel_id, {}))
 
         if (
             news_monitor_instance
@@ -617,13 +704,13 @@ def api_create_channel():
             and (news_monitor_instance.is_running or news_monitor_instance.any_channel_running())
             and enabled
         ):
-            news_monitor_instance.add_channel(channel_id, cfg)
+            news_monitor_instance.add_channel(channel_id, dict(RTSP_CHANNELS[channel_id]))
 
         return jsonify({
             'success': True,
             'channel_id': channel_id,
             'channel': cfg,
-            'channels': RTSP_CHANNELS,
+            'channels': channels_for_api(),
         }), 201
     except Exception as e:
         logging.error(f"Error creating channel: {e}")
@@ -649,7 +736,7 @@ def api_update_channel(channel_id):
                 'success': True,
                 'channel_id': channel_id,
                 'deleted': True,
-                'channels': RTSP_CHANNELS,
+                'channels': channels_for_api(),
             })
 
         body = request.get_json() or {}
@@ -668,6 +755,19 @@ def api_update_channel(channel_id):
             p = str(body['priority']).strip().lower()
             if p in ('high', 'medium', 'low'):
                 updates['priority'] = p
+        if 'text_regions' in body:
+            if body['text_regions'] is None:
+                updates['clear_text_regions'] = True
+            elif isinstance(body['text_regions'], dict):
+                url = existing[channel_id].get('rtsp_url') or ''
+                fallback = (
+                    YOUTUBE_TEXT_REGIONS
+                    if is_youtube_url(url)
+                    else TEXT_REGIONS
+                )
+                updates['text_regions'] = normalize_text_regions(
+                    body['text_regions'], fallback
+                )
 
         if not updates:
             return jsonify({'error': 'No fields to update'}), 400
@@ -676,7 +776,7 @@ def api_update_channel(channel_id):
             return jsonify({'error': 'Failed to update channel'}), 500
 
         refresh_rtsp_channels_cache()
-        cfg = dict(RTSP_CHANNELS[channel_id])
+        cfg = dict(channels_for_api().get(channel_id, RTSP_CHANNELS.get(channel_id, {})))
 
         if (
             news_monitor_instance
@@ -686,26 +786,85 @@ def api_update_channel(channel_id):
                 news_monitor_instance.is_running
                 or news_monitor_instance.any_channel_running()
             )
-            if 'enabled' in updates and len(updates) == 1:
+            # Hot-apply region edits without restarting the stream
+            if 'text_regions' in updates or updates.get('clear_text_regions'):
+                mon = news_monitor_instance.monitors.get(channel_id)
+                if mon:
+                    mon.set_text_regions(
+                        None if updates.get('clear_text_regions') else updates.get('text_regions')
+                    )
+                if channel_id in news_monitor_instance.channel_configs:
+                    if updates.get('clear_text_regions'):
+                        news_monitor_instance.channel_configs[channel_id].pop(
+                            'text_regions', None
+                        )
+                    elif 'text_regions' in updates:
+                        news_monitor_instance.channel_configs[channel_id][
+                            'text_regions'
+                        ] = updates['text_regions']
+
+            elif 'enabled' in updates and set(updates.keys()) <= {'enabled'}:
                 if running:
                     news_monitor_instance.set_channel_enabled(
                         channel_id, updates['enabled']
                     )
-            elif running:
-                # Name/URL/priority changed — restart channel if present
+            elif running and (
+                'name' in updates or 'rtsp_url' in updates or 'priority' in updates
+            ):
                 news_monitor_instance.remove_channel(channel_id)
                 if cfg.get('enabled'):
-                    news_monitor_instance.add_channel(channel_id, cfg)
+                    news_monitor_instance.add_channel(
+                        channel_id, dict(RTSP_CHANNELS[channel_id])
+                    )
+            elif 'enabled' in updates and running:
+                news_monitor_instance.set_channel_enabled(
+                    channel_id, updates['enabled']
+                )
 
         return jsonify({
             'success': True,
             'channel_id': channel_id,
             'enabled': cfg.get('enabled'),
             'channel': cfg,
-            'channels': RTSP_CHANNELS,
+            'channels': channels_for_api(),
         })
     except Exception as e:
         logging.error(f"Error updating channel {channel_id}: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/config/channels/<channel_id>/snapshot', methods=['GET'])
+def api_channel_snapshot(channel_id):
+    """Return a JPEG preview frame for region editing."""
+    try:
+        refresh_rtsp_channels_cache()
+        cfg = RTSP_CHANNELS.get(channel_id)
+        if not cfg:
+            return jsonify({'error': 'Channel not found'}), 404
+
+        source = 'live'
+        frame = _grab_rtsp_frame(cfg.get('rtsp_url') or '')
+        if frame is None:
+            # Fallback: latest OCR screenshot for this channel
+            shot = _latest_screenshot_for_channel(cfg.get('name') or '')
+            if shot and shot.exists():
+                frame = cv2.imread(str(shot))
+                source = 'screenshot'
+        if frame is None:
+            return jsonify({
+                'error': 'Could not capture a frame. Check the RTSP link or wait for an OCR screenshot.',
+            }), 502
+
+        h, w = frame.shape[:2]
+        jpeg = _encode_jpeg(frame)
+        resp = Response(jpeg, mimetype='image/jpeg')
+        resp.headers['X-Frame-Width'] = str(w)
+        resp.headers['X-Frame-Height'] = str(h)
+        resp.headers['X-Snapshot-Source'] = source
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp
+    except Exception as e:
+        logging.error(f"Snapshot error for {channel_id}: {e}")
         return jsonify({'error': str(e)}), 500
 
 # WebSocket handlers for real-time updates

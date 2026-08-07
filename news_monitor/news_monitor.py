@@ -18,6 +18,7 @@ import json
 from config import (
     RTSP_CHANNELS, RTSP_URL, TEXT_REGIONS, YOUTUBE_TEXT_REGIONS,
     PROCESSING_CONFIG, STORAGE_CONFIG, ALERTS_CONFIG, SPEECH_CONFIG,
+    normalize_text_regions,
 )
 from utrnet_wrapper import (
     UTRNetPredictor,
@@ -42,12 +43,13 @@ class NewsMonitor:
     """
     
     def __init__(self, rtsp_url: str = None, channel_name: str = "news_channel",
-                 speech_enabled: bool = True):
+                 speech_enabled: bool = True, text_regions: Dict = None):
         self.source_url = (rtsp_url or RTSP_URL).strip()
         self.rtsp_url = self.source_url
         self.channel_name = channel_name
         self.speech_enabled = speech_enabled
         self.stream_error: Optional[str] = None
+        self.custom_text_regions = text_regions if isinstance(text_regions, dict) else None
         
         # Each channel loads its own OCR + optional speech models
         self.utr_predictor = None
@@ -283,10 +285,21 @@ class NewsMonitor:
             cap.release()
 
     def _get_text_regions(self) -> Dict:
-        """YouTube: ticker strips only. RTSP: broadcast ticker/headline layout."""
+        """Prefer per-channel boxes; else YouTube strips or global RTSP layout."""
+        if self.custom_text_regions:
+            fallback = (
+                YOUTUBE_TEXT_REGIONS
+                if is_youtube_url(self.source_url)
+                else TEXT_REGIONS
+            )
+            return normalize_text_regions(self.custom_text_regions, fallback)
         if is_youtube_url(self.source_url):
             return YOUTUBE_TEXT_REGIONS
         return TEXT_REGIONS
+
+    def set_text_regions(self, regions: Optional[Dict]) -> None:
+        """Hot-update OCR crop boxes for this channel (Settings editor)."""
+        self.custom_text_regions = regions if isinstance(regions, dict) else None
 
     def _clear_queues(self):
         """Clear processing queues"""
@@ -807,6 +820,7 @@ class MultiChannelNewsMonitor:
                         rtsp_url=config['rtsp_url'],
                         channel_name=config['name'],
                         speech_enabled=False,
+                        text_regions=config.get('text_regions'),
                     )
                     self.monitors[channel_id] = monitor
                     logging.info("Initialized monitor for channel: %s", config['name'])
@@ -1037,6 +1051,7 @@ class MultiChannelNewsMonitor:
                     rtsp_url=cfg['rtsp_url'],
                     channel_name=cfg['name'],
                     speech_enabled=False,
+                    text_regions=cfg.get('text_regions'),
                 )
             if self.is_running and not self.monitors[channel_id].is_running:
                 self.monitors[channel_id].start_monitoring()
@@ -1064,6 +1079,7 @@ class MultiChannelNewsMonitor:
                 rtsp_url=config['rtsp_url'],
                 channel_name=config['name'],
                 speech_enabled=False,
+                text_regions=config.get('text_regions'),
             )
 
             self.monitors[channel_id] = monitor
