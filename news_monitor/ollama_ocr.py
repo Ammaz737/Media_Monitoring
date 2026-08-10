@@ -24,27 +24,37 @@ from config import OLLAMA_OCR_CONFIG
 _JSON_RE = re.compile(r"\{[^{}]*\}", re.DOTALL)
 
 _SYSTEM_PROMPT = (
-    "You are an Urdu TV news ticker OCR verifier. "
-    "Read ONLY what is visibly written in the image. "
-    "Never invent, complete, or guess missing words."
+    "You are an Urdu TV news ticker OCR reader. "
+    "The IMAGE is the only ground truth. "
+    "Transcribe visible text exactly — never invent, complete, fix spelling, or guess."
 )
 
 
-def _user_prompt(draft_text: str) -> str:
+def _user_prompt(draft_text: str, draft_confidence: Optional[float] = None) -> str:
     draft = (draft_text or "").strip() or "(none)"
+    if draft_confidence is not None:
+        conf_label = f"{float(draft_confidence):.2f}"
+        draft_line = (
+            f"UTRNet draft (conf={conf_label}; hint only — ignore if it disagrees "
+            f"with the image): {draft}"
+        )
+    else:
+        draft_line = (
+            f"UTRNet draft (hint only — ignore if it disagrees with the image): {draft}"
+        )
     return (
-        "This image is a crop of a Urdu news ticker or headline.\n"
-        f"UTRNet draft (may be wrong — do NOT trust it if the image disagrees): {draft}\n\n"
+        "Horizontal TV news ticker crop: usually one line of white Urdu "
+        "(Nastaliq) on a red/colored bar; may be soft or motion-blurred.\n"
+        f"{draft_line}\n\n"
         "Rules:\n"
-        "1. Read ONLY the text visibly written in the IMAGE.\n"
-        "2. If the text is clearly readable, return that exact text as written, "
-        "including Urdu, English words (e.g. highest), numbers and percentages.\n"
-        "3. If the text is blurry, garbled, cut off, or not readable at all: "
-        "discard it — set text to an empty string and confidence between 0.0 and 0.10.\n"
-        "4. Never invent, complete, or guess missing words. Never copy the draft unless "
-        "it matches the image.\n"
-        "5. confidence must be from 0.0 to 1.0.\n"
-        "6. Respond with JSON only, no markdown:\n"
+        "1. Read ONLY glyphs visible in the IMAGE. Prefer empty text over guessing.\n"
+        "2. Copy exactly: Urdu, Latin words, digits, %, punctuation. "
+        "Do not normalize spelling, finish cut-off words, or rewrite news phrasing.\n"
+        "3. Confidence: >=0.90 only if every word is clear; "
+        "0.50–0.80 if partly readable; <=0.10 if blurry, garbled, cut off, or blank "
+        "(then set text to \"\").\n"
+        "4. Never copy the draft unless it matches the image character-for-character.\n"
+        "5. Reply with JSON only, no markdown:\n"
         '{"text":"...","confidence":0.0}\n'
     )
 
@@ -95,6 +105,7 @@ class OllamaVisionOcr:
         self,
         image_bgr: np.ndarray,
         draft_text: str = "",
+        draft_confidence: Optional[float] = None,
     ) -> Tuple[str, float]:
         """
         Ask Ollama to read the crop. Returns (text, confidence).
@@ -115,11 +126,12 @@ class OllamaVisionOcr:
             if not self.ping():
                 logging.warning("Ollama not reachable at %s", self.cfg.get("base_url"))
                 return "", 0.0
-            payload = self._build_payload(image_bgr, draft_text)
+            payload = self._build_payload(image_bgr, draft_text, draft_confidence)
             logging.info(
-                "Ollama OCR calling model=%s draft_len=%s",
+                "Ollama OCR calling model=%s draft_len=%s utr_conf=%s",
                 payload.get("model"),
                 len(draft_text or ""),
+                f"{float(draft_confidence):.3f}" if draft_confidence is not None else "n/a",
             )
             raw = self._post_generate(payload)
             text, confidence = self._parse_response(raw)
@@ -156,7 +168,12 @@ class OllamaVisionOcr:
             raise RuntimeError("Failed to JPEG-encode OCR crop for Ollama")
         return base64.b64encode(buf.tobytes()).decode("ascii")
 
-    def _build_payload(self, image_bgr: np.ndarray, draft_text: str) -> Dict[str, Any]:
+    def _build_payload(
+        self,
+        image_bgr: np.ndarray,
+        draft_text: str,
+        draft_confidence: Optional[float] = None,
+    ) -> Dict[str, Any]:
         b64 = self._encode_image(image_bgr)
         payload: Dict[str, Any] = {
             "model": self.cfg.get("model", "qwen3.6:latest"),
@@ -173,7 +190,7 @@ class OllamaVisionOcr:
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {
                     "role": "user",
-                    "content": _user_prompt(draft_text),
+                    "content": _user_prompt(draft_text, draft_confidence),
                     "images": [b64],
                 },
             ],

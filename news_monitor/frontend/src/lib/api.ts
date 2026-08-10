@@ -268,7 +268,8 @@ export const api = {
     }),
 
   getChannelSnapshot: async (channelId: string) => {
-    const base = getApiBase();
+    // Hit Flask directly — YouTube resolve + ffmpeg can exceed Next rewrite defaults
+    const base = getFlaskDirectBase();
     const url = `${base}/api/config/channels/${encodeURIComponent(channelId)}/snapshot`;
     let res: Response;
     try {

@@ -24,7 +24,7 @@ from config import (
 )
 from database import NewsDatabase
 from news_monitor import NewsMonitor, MultiChannelNewsMonitor
-from stream_resolver import is_youtube_url, resolve_stream_url
+from stream_resolver import is_youtube_url, resolve_stream_url, grab_stream_frame
 from nvr_playback import (
     extract_playback_audio_clip,
     live_rtsp_to_playback_url,
@@ -110,41 +110,35 @@ def channels_for_api() -> Dict:
     return out
 
 
-def _grab_rtsp_frame(rtsp_url: str, timeout_sec: float = 12.0) -> Optional[np.ndarray]:
-    """Grab a single BGR frame from an RTSP/HTTP stream."""
-    url = (rtsp_url or '').strip()
-    if not url:
-        return None
-    try:
-        resolved, err = resolve_stream_url(url)
-        if err:
-            logging.warning("Snapshot resolve failed: %s", err)
-        else:
-            url = resolved
-    except Exception as e:
-        logging.warning("Snapshot resolve error: %s", e)
+def _grab_rtsp_frame(rtsp_url: str, timeout_sec: float = 20.0) -> Optional[np.ndarray]:
+    """Grab a single BGR frame from an RTSP/HTTP/YouTube stream."""
+    frame, err = grab_stream_frame(rtsp_url, timeout_sec=timeout_sec)
+    if err:
+        logging.warning("Snapshot grab failed: %s", err)
+    return frame
 
-    cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-    if not cap.isOpened():
-        cap.release()
+
+def _live_monitor_preview_frame(channel_id: str) -> Optional[np.ndarray]:
+    """Reuse a frame already captured by the running multi-channel monitor."""
+    mon = None
+    if isinstance(news_monitor_instance, MultiChannelNewsMonitor):
+        mon = news_monitor_instance.monitors.get(channel_id)
+    elif (
+        isinstance(news_monitor_instance, NewsMonitor)
+        and getattr(news_monitor_instance, 'channel_name', None)
+    ):
+        # Single-channel mode — accept if names roughly match
+        mon = news_monitor_instance
+    if mon is None or not getattr(mon, 'is_running', False):
+        return None
+    getter = getattr(mon, 'get_preview_frame', None)
+    if not callable(getter):
         return None
     try:
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        deadline = time.time() + timeout_sec
-        best = None
-        for _ in range(10):
-            if time.time() > deadline:
-                break
-            ret, frame = cap.read()
-            if ret and frame is not None:
-                best = frame
-                # Prefer a later frame once the stream has warmed up
-                if _ >= 2:
-                    break
-            time.sleep(0.12)
-        return best
-    finally:
-        cap.release()
+        return getter()
+    except Exception as e:
+        logging.warning("Live preview frame failed for %s: %s", channel_id, e)
+        return None
 
 
 def _latest_screenshot_for_channel(display_name: str) -> Optional[Path]:
@@ -1035,24 +1029,34 @@ def api_update_channel(channel_id):
 
 @app.route('/api/config/channels/<channel_id>/snapshot', methods=['GET'])
 def api_channel_snapshot(channel_id):
-    """Return a JPEG preview frame for region editing."""
+    """Return a JPEG preview frame for region editing (RTSP or YouTube)."""
     try:
         refresh_rtsp_channels_cache()
         cfg = RTSP_CHANNELS.get(channel_id)
         if not cfg:
             return jsonify({'error': 'Channel not found'}), 404
 
+        stream_url = (cfg.get('rtsp_url') or '').strip()
         source = 'live'
-        frame = _grab_rtsp_frame(cfg.get('rtsp_url') or '')
+        grab_err = None
+
+        # Prefer a frame the monitor already has (fast + works for YouTube HLS)
+        frame = _live_monitor_preview_frame(channel_id)
+        if frame is not None:
+            source = 'monitor'
+        else:
+            timeout = 25.0 if is_youtube_url(stream_url) else 12.0
+            frame, grab_err = grab_stream_frame(stream_url, timeout_sec=timeout)
+            if frame is None:
+                shot = _latest_screenshot_for_channel(cfg.get('name') or '')
+                if shot and shot.exists():
+                    frame = cv2.imread(str(shot))
+                    source = 'screenshot'
         if frame is None:
-            # Fallback: latest OCR screenshot for this channel
-            shot = _latest_screenshot_for_channel(cfg.get('name') or '')
-            if shot and shot.exists():
-                frame = cv2.imread(str(shot))
-                source = 'screenshot'
-        if frame is None:
+            kind = 'YouTube' if is_youtube_url(stream_url) else 'RTSP'
+            detail = grab_err or f'Check the {kind} link or start monitoring first.'
             return jsonify({
-                'error': 'Could not capture a frame. Check the RTSP link or wait for an OCR screenshot.',
+                'error': f'Could not capture a frame. {detail}',
             }), 502
 
         h, w = frame.shape[:2]

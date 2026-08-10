@@ -305,12 +305,26 @@ class UTRNetPredictor:
                     }
                     continue
 
-                # Raw frame crop; optionally enhance before UTRNet
-                _save_ocr_crop(region_img, region_name, channel_name, suffix="raw")
-                ocr_input = region_img
-                if PROCESSING_CONFIG.get("ocr_enhance_crop", False):
-                    ocr_input = enhance_region_for_ocr(region_img)
-                    _save_ocr_crop(ocr_input, region_name, channel_name, suffix="enhanced")
+                # Raw frame crop; optionally preprocess before UTRNet / Ollama
+                raw_hash = _ocr_crop_content_hash(region_img)
+                _save_ocr_crop(
+                    region_img,
+                    region_name,
+                    channel_name,
+                    suffix="raw",
+                    base_hash=raw_hash,
+                )
+                preprocess_mode = resolve_ocr_preprocess_mode()
+                ocr_input = preprocess_region_for_ocr(region_img)
+                if preprocess_mode != "none":
+                    # Same original hash + "_clear_text_hd" so HD pairs with raw
+                    _save_ocr_crop(
+                        ocr_input,
+                        region_name,
+                        channel_name,
+                        suffix=preprocess_mode,
+                        base_hash=raw_hash,
+                    )
                 with self._infer_lock:
                     text, confidence = self.predict_single(ocr_input)
 
@@ -324,6 +338,9 @@ class UTRNetPredictor:
                     'region_min_confidence': float(
                         region_config.get('min_confidence', 0.5)
                     ),
+                    # Same pixels UTRNet saw — reuse for Ollama / screenshots
+                    'ocr_image': ocr_input,
+                    'ocr_preprocess': preprocess_mode,
                 }
 
             except Exception as e:
@@ -395,8 +412,9 @@ def _safe_filename_part(value: str, fallback: str = "unknown") -> str:
 
 
 # Content hashes of OCR crops already written this process (avoids re-stat/re-write)
-_saved_ocr_crop_hashes: Set[str] = set()
-_saved_ocr_crop_hashes_lock = threading.Lock()
+# Keys are "{base_hash}_{stage}" so raw + clear_text_hd share one original id
+_saved_ocr_crop_keys: Set[str] = set()
+_saved_ocr_crop_keys_lock = threading.Lock()
 
 
 def _ocr_crop_content_hash(region_img: np.ndarray) -> str:
@@ -414,31 +432,39 @@ def _save_ocr_crop(
     region_name: str,
     channel_name: Optional[str] = None,
     suffix: str = "raw",
+    base_hash: Optional[str] = None,
 ) -> Optional[Path]:
-    """Persist OCR region crops for debugging; skip identical content by hash."""
+    """
+    Persist OCR region crops for debugging.
+
+    Filenames share the original (raw) content hash so pairs match:
+      {raw_hash}_Channel_ticker_raw.png
+      {raw_hash}_Channel_ticker_clear_text_hd.png
+    """
     if not PROCESSING_CONFIG.get("save_ocr_crops", False):
         return None
     try:
-        content_hash = _ocr_crop_content_hash(region_img)
-        with _saved_ocr_crop_hashes_lock:
-            if content_hash in _saved_ocr_crop_hashes:
+        # Always key/name from the original crop hash when provided
+        name_hash = base_hash or _ocr_crop_content_hash(region_img)
+        stage = _safe_filename_part(suffix, "raw")
+        dedupe_key = f"{name_hash}_{stage}"
+        with _saved_ocr_crop_keys_lock:
+            if dedupe_key in _saved_ocr_crop_keys:
                 return None
 
         crops_dir = Path(STORAGE_CONFIG["ocr_crops_dir"])
         crops_dir.mkdir(parents=True, exist_ok=True)
         channel_part = _safe_filename_part(channel_name or "channel")
         region_part = _safe_filename_part(region_name, "region")
-        stage = _safe_filename_part(suffix, "raw")
-        # Hash-first name so identical crops map to one file across runs
-        filepath = crops_dir / f"{content_hash}_{channel_part}_{region_part}_{stage}.png"
+        filepath = crops_dir / f"{name_hash}_{channel_part}_{region_part}_{stage}.png"
         if filepath.exists():
-            with _saved_ocr_crop_hashes_lock:
-                _saved_ocr_crop_hashes.add(content_hash)
+            with _saved_ocr_crop_keys_lock:
+                _saved_ocr_crop_keys.add(dedupe_key)
             return filepath
 
         cv2.imwrite(str(filepath), region_img)
-        with _saved_ocr_crop_hashes_lock:
-            _saved_ocr_crop_hashes.add(content_hash)
+        with _saved_ocr_crop_keys_lock:
+            _saved_ocr_crop_keys.add(dedupe_key)
         return filepath
     except Exception as e:
         logging.warning(f"Failed to save OCR crop ({region_name}): {e}")
@@ -446,6 +472,17 @@ def _save_ocr_crop(
 
 
 # Utility functions for text processing
+def resolve_ocr_preprocess_mode() -> str:
+    """Return active OCR crop preprocess mode (none | clahe_otsu | clear_text_hd)."""
+    mode = str(PROCESSING_CONFIG.get("ocr_preprocess") or "none").strip().lower()
+    if mode not in ("none", "clahe_otsu", "clear_text_hd"):
+        mode = "none"
+    # Legacy flag: ocr_enhance_crop=True with mode none → clahe_otsu
+    if mode == "none" and PROCESSING_CONFIG.get("ocr_enhance_crop", False):
+        return "clahe_otsu"
+    return mode
+
+
 def enhance_region_for_ocr(region_img: np.ndarray) -> np.ndarray:
     """Upscale and boost contrast on ticker crops (helps YouTube compression)."""
     h, w = region_img.shape[:2]
@@ -464,6 +501,48 @@ def enhance_region_for_ocr(region_img: np.ndarray) -> np.ndarray:
     gray = cv2.GaussianBlur(gray, (3, 3), 0)
     _, gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+
+def enhance_region_clear_text_hd(region_img: np.ndarray) -> np.ndarray:
+    """Color-preserving upscale + denoise + sharpen for clearer ticker text."""
+    img = region_img
+    h, w = img.shape[:2]
+    if h < 1 or w < 1:
+        return region_img
+
+    # Upscale short ticker bands so glyphs are easier for OCR / vision models
+    target_h = max(h * 2, 64) if h < 64 else h
+    if h < target_h:
+        scale = target_h / float(h)
+        new_w = int(w * scale)
+        # Cap extreme widths on full-bleed tickers
+        if new_w > 1920:
+            scale = 1920 / float(w)
+            target_h = max(1, int(h * scale))
+            new_w = 1920
+        img = cv2.resize(
+            img,
+            (max(1, new_w), max(1, target_h)),
+            interpolation=cv2.INTER_CUBIC,
+        )
+
+    # Mild NL-means: strip compression grain without melting Urdu strokes
+    img = cv2.fastNlMeansDenoisingColored(img, None, 5, 5, 7, 21)
+
+    # Unsharp mask for crisper glyph edges
+    blur = cv2.GaussianBlur(img, (0, 0), sigmaX=1.0)
+    img = cv2.addWeighted(img, 1.45, blur, -0.45, 0)
+    return img
+
+
+def preprocess_region_for_ocr(region_img: np.ndarray) -> np.ndarray:
+    """Apply configured OCR crop preprocess (or return raw)."""
+    mode = resolve_ocr_preprocess_mode()
+    if mode == "clahe_otsu":
+        return enhance_region_for_ocr(region_img)
+    if mode == "clear_text_hd":
+        return enhance_region_clear_text_hd(region_img)
+    return region_img
 
 
 def region_likely_contains_text(region_img: np.ndarray) -> bool:

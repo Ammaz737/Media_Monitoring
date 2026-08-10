@@ -3,6 +3,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent,
@@ -22,12 +23,19 @@ import { cn } from "@/lib/utils";
 import type { TextRegionMap } from "@/lib/types";
 import { api } from "@/lib/api";
 
-export type RegionKey = "ticker" | "headline" | "side_text";
+export type RtspRegionKey = "ticker" | "headline" | "side_text";
+export type YoutubeRegionKey = "youtube_ticker" | "youtube_top_bar";
+export type RegionKey = RtspRegionKey | YoutubeRegionKey;
 
-const REGION_META: Record<
-  RegionKey,
-  { label: string; hint: string; color: string; ring: string; fill: string }
-> = {
+type RegionMeta = {
+  label: string;
+  hint: string;
+  color: string;
+  ring: string;
+  fill: string;
+};
+
+const RTSP_REGION_META: Record<RtspRegionKey, RegionMeta> = {
   ticker: {
     label: "Ticker",
     hint: "Bottom news crawl",
@@ -51,7 +59,24 @@ const REGION_META: Record<
   },
 };
 
-const DEFAULT_REGIONS: TextRegionMap = {
+const YOUTUBE_REGION_META: Record<YoutubeRegionKey, RegionMeta> = {
+  youtube_ticker: {
+    label: "Ticker",
+    hint: "Bottom YouTube crawl",
+    color: "#f59e0b",
+    ring: "ring-amber-400",
+    fill: "bg-amber-400/20 border-amber-400",
+  },
+  youtube_top_bar: {
+    label: "Top bar",
+    hint: "Breaking / headline strip",
+    color: "#38bdf8",
+    ring: "ring-sky-400",
+    fill: "bg-sky-400/20 border-sky-400",
+  },
+};
+
+const DEFAULT_RTSP_REGIONS: TextRegionMap = {
   ticker: {
     name: "Bottom Ticker",
     region: [0, 0.8, 1.0, 1.0],
@@ -71,6 +96,24 @@ const DEFAULT_REGIONS: TextRegionMap = {
     min_confidence: 0.5,
   },
 };
+
+const DEFAULT_YOUTUBE_REGIONS: TextRegionMap = {
+  youtube_ticker: {
+    name: "Bottom Ticker",
+    region: [0.0, 0.86, 1.0, 0.99],
+    priority: "high",
+    min_confidence: 0.72,
+  },
+  youtube_top_bar: {
+    name: "Top Breaking Bar",
+    region: [0.0, 0.0, 1.0, 0.11],
+    priority: "high",
+    min_confidence: 0.72,
+  },
+};
+
+/** @deprecated use DEFAULT_RTSP_REGIONS */
+const DEFAULT_REGIONS = DEFAULT_RTSP_REGIONS;
 
 type DragMode =
   | { type: "move"; key: RegionKey; ox: number; oy: number; start: number[] }
@@ -105,17 +148,57 @@ function normalizeBox(r: number[]): [number, number, number, number] {
   ];
 }
 
-function ensureRegionMap(input?: TextRegionMap | null): TextRegionMap {
+export function isYoutubeStreamUrl(url?: string | null): boolean {
+  const u = (url || "").toLowerCase();
+  return (
+    u.includes("youtube.com") ||
+    u.includes("youtu.be") ||
+    u.includes("youtube-nocookie.com") ||
+    u.startsWith("yt:")
+  );
+}
+
+function ensureRegionMap(
+  input: TextRegionMap | null | undefined,
+  defaults: TextRegionMap
+): TextRegionMap {
+  const keys = Object.keys(defaults);
   const out: TextRegionMap = {};
-  for (const key of Object.keys(DEFAULT_REGIONS) as RegionKey[]) {
-    const src = input?.[key] ?? DEFAULT_REGIONS[key];
+  for (const key of keys) {
+    const src = input?.[key] ?? defaults[key];
     out[key] = {
-      ...DEFAULT_REGIONS[key],
+      ...defaults[key],
       ...src,
-      region: normalizeBox(src.region ?? DEFAULT_REGIONS[key].region),
+      region: normalizeBox(src.region ?? defaults[key].region),
     };
   }
   return out;
+}
+
+/** Map legacy RTSP-style boxes onto YouTube keys when re-opening editor. */
+function coerceYoutubeRegions(input?: TextRegionMap | null): TextRegionMap {
+  if (!input) return ensureRegionMap(null, DEFAULT_YOUTUBE_REGIONS);
+  const hasYt = Object.keys(input).some((k) => k.startsWith("youtube_"));
+  if (hasYt) return ensureRegionMap(input, DEFAULT_YOUTUBE_REGIONS);
+
+  const mapped: TextRegionMap = { ...DEFAULT_YOUTUBE_REGIONS };
+  if (input.ticker?.region) {
+    mapped.youtube_ticker = {
+      ...DEFAULT_YOUTUBE_REGIONS.youtube_ticker,
+      ...input.ticker,
+      name: input.ticker.name || "Bottom Ticker",
+      region: normalizeBox(input.ticker.region),
+    };
+  }
+  if (input.headline?.region) {
+    mapped.youtube_top_bar = {
+      ...DEFAULT_YOUTUBE_REGIONS.youtube_top_bar,
+      ...input.headline,
+      name: input.headline.name || "Top Breaking Bar",
+      region: normalizeBox(input.headline.region),
+    };
+  }
+  return ensureRegionMap(mapped, DEFAULT_YOUTUBE_REGIONS);
 }
 
 interface RegionEditorDialogProps {
@@ -123,6 +206,7 @@ interface RegionEditorDialogProps {
   onOpenChange: (open: boolean) => void;
   channelId: string;
   channelName: string;
+  streamUrl?: string;
   initialRegions?: TextRegionMap | null;
   onSaved: (channels: Record<string, unknown>) => void;
 }
@@ -132,14 +216,25 @@ export function RegionEditorDialog({
   onOpenChange,
   channelId,
   channelName,
+  streamUrl,
   initialRegions,
   onSaved,
 }: RegionEditorDialogProps) {
   const stageRef = useRef<HTMLDivElement>(null);
-  const [regions, setRegions] = useState<TextRegionMap>(() =>
-    ensureRegionMap(initialRegions)
+  const youtube = isYoutubeStreamUrl(streamUrl);
+  const defaults = youtube ? DEFAULT_YOUTUBE_REGIONS : DEFAULT_RTSP_REGIONS;
+  const regionMeta = youtube ? YOUTUBE_REGION_META : RTSP_REGION_META;
+  const regionKeys = useMemo(
+    () => Object.keys(defaults) as RegionKey[],
+    [defaults]
   );
-  const [active, setActive] = useState<RegionKey>("ticker");
+
+  const [regions, setRegions] = useState<TextRegionMap>(() =>
+    youtube
+      ? coerceYoutubeRegions(initialRegions)
+      : ensureRegionMap(initialRegions, DEFAULT_RTSP_REGIONS)
+  );
+  const [active, setActive] = useState<RegionKey>(regionKeys[0]);
   const [snapshotUrl, setSnapshotUrl] = useState<string | null>(null);
   const [snapshotMeta, setSnapshotMeta] = useState<{
     w: number;
@@ -175,8 +270,11 @@ export function RegionEditorDialog({
 
   useEffect(() => {
     if (!open) return;
-    setRegions(ensureRegionMap(initialRegions));
-    setActive("ticker");
+    const next = youtube
+      ? coerceYoutubeRegions(initialRegions)
+      : ensureRegionMap(initialRegions, DEFAULT_RTSP_REGIONS);
+    setRegions(next);
+    setActive((Object.keys(next)[0] as RegionKey) || regionKeys[0]);
     setStatus(null);
     void loadSnapshot();
     return () => {
@@ -185,7 +283,7 @@ export function RegionEditorDialog({
         return null;
       });
     };
-  }, [open, channelId, initialRegions, loadSnapshot]);
+  }, [open, channelId, initialRegions, loadSnapshot, youtube, regionKeys]);
 
   const pointerToFrac = (clientX: number, clientY: number) => {
     const el = stageRef.current;
@@ -306,7 +404,12 @@ export function RegionEditorDialog({
     setSaving(true);
     setStatus(null);
     try {
-      const res = await api.updateChannelRegions(channelId, regions);
+      // Persist only the keys for this stream type (drops leftover RTSP keys on YT)
+      const payload: TextRegionMap = {};
+      for (const key of regionKeys) {
+        if (regions[key]) payload[key] = regions[key];
+      }
+      const res = await api.updateChannelRegions(channelId, payload);
       onSaved(res.channels as Record<string, unknown>);
       setStatus("Regions saved — OCR will use these boxes immediately");
       onOpenChange(false);
@@ -318,12 +421,17 @@ export function RegionEditorDialog({
   };
 
   const handleReset = () => {
-    setRegions(ensureRegionMap(DEFAULT_REGIONS));
-    setStatus("Reset to defaults (not saved yet)");
+    setRegions(ensureRegionMap(null, defaults));
+    setActive(regionKeys[0]);
+    setStatus(
+      youtube
+        ? "Reset to YouTube defaults (not saved yet)"
+        : "Reset to defaults (not saved yet)"
+    );
   };
 
   const activeDef = regions[active];
-  const meta = REGION_META[active];
+  const meta = regionMeta[active as keyof typeof regionMeta];
 
   return (
     <Dialog
@@ -354,13 +462,19 @@ export function RegionEditorDialog({
               <div className="mb-1 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-300/80">
                 <Scan className="h-3.5 w-3.5" />
                 OCR crop studio
+                {youtube && (
+                  <span className="rounded-full bg-rose-500/15 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-rose-300">
+                    YouTube
+                  </span>
+                )}
               </div>
               <h3 className="text-xl font-semibold tracking-tight text-white">
                 {channelName}
               </h3>
               <p className="mt-1 max-w-xl text-sm text-slate-400">
-                Drag boxes on the frame to set ticker, headline, and side OCR
-                zones. Boxes are saved per channel.
+                {youtube
+                  ? "Drag the ticker and top-bar boxes on the YouTube frame. Boxes are saved per channel."
+                  : "Drag boxes on the frame to set ticker, headline, and side OCR zones. Boxes are saved per channel."}
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -425,7 +539,11 @@ export function RegionEditorDialog({
                   {loadingShot ? (
                     <>
                       <Loader2 className="h-8 w-8 animate-spin text-sky-400" />
-                      <p className="text-sm">Capturing RTSP frame…</p>
+                      <p className="text-sm">
+                        {youtube
+                          ? "Resolving YouTube frame… (10–25s)"
+                          : "Capturing RTSP frame…"}
+                      </p>
                     </>
                   ) : (
                     <>
@@ -441,9 +559,10 @@ export function RegionEditorDialog({
 
               {/* Region overlays — same box as the image */}
               {snapshotUrl &&
-                (Object.keys(REGION_META) as RegionKey[]).map((key) => {
+                regionKeys.map((key) => {
                 const def = regions[key];
-                const m = REGION_META[key];
+                const m = regionMeta[key as keyof typeof regionMeta];
+                if (!def || !m) return null;
                 const [x1, y1, x2, y2] = def.region;
                 const isActive = active === key;
                 return (
@@ -525,8 +644,9 @@ export function RegionEditorDialog({
             <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">
               Regions
             </p>
-            {(Object.keys(REGION_META) as RegionKey[]).map((key) => {
-              const m = REGION_META[key];
+            {regionKeys.map((key) => {
+              const m = regionMeta[key as keyof typeof regionMeta];
+              if (!m) return null;
               const selected = active === key;
               return (
                 <button
@@ -554,32 +674,34 @@ export function RegionEditorDialog({
               );
             })}
 
-            <div className="mt-1 rounded-xl border border-white/10 bg-white/[0.03] p-3">
-              <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                {meta.label} · fractions
-              </p>
-              <div className="grid grid-cols-2 gap-2">
-                {(["x1", "y1", "x2", "y2"] as const).map((label, idx) => (
-                  <label key={label} className="space-y-1">
-                    <span className="text-[10px] uppercase text-slate-500">
-                      {label}
-                    </span>
-                    <Input
-                      type="number"
-                      step="0.01"
-                      min={0}
-                      max={1}
-                      value={activeDef.region[idx]}
-                      onChange={(e) => setCoord(idx, e.target.value)}
-                      className="h-9 border-white/10 bg-[#0b1220] font-mono text-xs text-slate-100"
-                    />
-                  </label>
-                ))}
+            {activeDef && meta && (
+              <div className="mt-1 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+                <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                  {meta.label} · fractions
+                </p>
+                <div className="grid grid-cols-2 gap-2">
+                  {(["x1", "y1", "x2", "y2"] as const).map((label, idx) => (
+                    <label key={label} className="space-y-1">
+                      <span className="text-[10px] uppercase text-slate-500">
+                        {label}
+                      </span>
+                      <Input
+                        type="number"
+                        step="0.01"
+                        min={0}
+                        max={1}
+                        value={activeDef.region[idx]}
+                        onChange={(e) => setCoord(idx, e.target.value)}
+                        className="h-9 border-white/10 bg-[#0b1220] font-mono text-xs text-slate-100"
+                      />
+                    </label>
+                  ))}
+                </div>
+                <p className="mt-2 font-mono text-[10px] text-slate-500">
+                  conf ≥ {activeDef.min_confidence} · {activeDef.priority}
+                </p>
               </div>
-              <p className="mt-2 font-mono text-[10px] text-slate-500">
-                conf ≥ {activeDef.min_confidence} · {activeDef.priority}
-              </p>
-            </div>
+            )}
           </aside>
         </div>
 
@@ -616,4 +738,4 @@ export function RegionEditorDialog({
   );
 }
 
-export { DEFAULT_REGIONS, ensureRegionMap };
+export { DEFAULT_REGIONS, DEFAULT_RTSP_REGIONS, DEFAULT_YOUTUBE_REGIONS, ensureRegionMap };

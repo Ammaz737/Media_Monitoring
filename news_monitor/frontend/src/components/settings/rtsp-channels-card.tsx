@@ -8,7 +8,7 @@ import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogFooter } from "@/components/ui/dialog";
-import { RegionEditorDialog } from "@/components/settings/region-editor-dialog";
+import { RegionEditorDialog, isYoutubeStreamUrl } from "@/components/settings/region-editor-dialog";
 import { TrackPlayerDialog } from "@/components/settings/track-player-dialog";
 import { cn } from "@/lib/utils";
 import type { RtspChannelConfig, TextRegionMap } from "@/lib/types";
@@ -61,6 +61,7 @@ export function RtspChannelsCard({
   const [regionEdit, setRegionEdit] = useState<{
     id: string;
     name: string;
+    streamUrl: string;
     regions?: TextRegionMap | null;
   } | null>(null);
   const [trackPlay, setTrackPlay] = useState<{
@@ -258,6 +259,7 @@ export function RtspChannelsCard({
                           setRegionEdit({
                             id,
                             name: ch.name,
+                            streamUrl: ch.rtsp_url,
                             regions: ch.text_regions,
                           })
                         }
@@ -265,19 +267,21 @@ export function RtspChannelsCard({
                         <Scan className="h-3.5 w-3.5" />
                         Edit OCR regions
                       </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="h-8 text-xs"
-                        disabled={busy}
-                        onClick={() =>
-                          setTrackPlay({ id, name: ch.name })
-                        }
-                      >
-                        <Video className="h-3.5 w-3.5" />
-                        Play track
-                      </Button>
+                      {!isYoutubeStreamUrl(ch.rtsp_url) && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-8 text-xs"
+                          disabled={busy}
+                          onClick={() =>
+                            setTrackPlay({ id, name: ch.name })
+                          }
+                        >
+                          <Video className="h-3.5 w-3.5" />
+                          Play track
+                        </Button>
+                      )}
                     </div>
                   </div>
 
@@ -365,6 +369,7 @@ export function RtspChannelsCard({
           }}
           channelId={regionEdit.id}
           channelName={regionEdit.name}
+          streamUrl={regionEdit.streamUrl}
           initialRegions={regionEdit.regions}
           onSaved={(next) => {
             onChannelsUpdated?.(next as Record<string, RtspChannel>);

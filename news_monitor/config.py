@@ -132,9 +132,14 @@ PROCESSING_CONFIG = {
     'min_region_height_px': 22,
     'min_region_width_px': 80,
     'duplicate_text_threshold': 0.8,  # Similarity threshold to avoid duplicates
-    # Save OCR region crops for debugging (raw and/or enhanced, depending on enhance flag)
+    # Save OCR region crops for debugging (raw always; preprocessed when mode != none)
     'save_ocr_crops': True,
-    # If False, pass the raw crop to UTRNet (skip CLAHE/Otsu enhance — often better for TV tickers)
+    # Crop preprocess before UTRNet / Ollama:
+    #   "none"          — raw crop
+    #   "clahe_otsu"    — grayscale CLAHE + Otsu (legacy binary enhance)
+    #   "clear_text_hd" — upscale + NLMeans denoise + unsharp (color-preserving)
+    'ocr_preprocess': 'clear_text_hd',
+    # Legacy: if True and ocr_preprocess is "none", behaves like "clahe_otsu"
     'ocr_enhance_crop': False,
 }
 
@@ -144,13 +149,15 @@ OLLAMA_OCR_CONFIG = {
     'enabled': True,
     'base_url': os.environ.get('OLLAMA_HOST', 'http://127.0.0.1:11434').rstrip('/'),
     # Prefer a vision model that fits beside UTRNet on 16GB (qwen3.6:latest is ~23GB)
-    'model': os.environ.get('OLLAMA_OCR_MODEL', 'qwen3-vl:8b'),
-    'utrnet_min': 0.80,   # below this → discard (do not call Ollama)
-    'utrnet_high': 0.95,  # at/above this → trust UTRNet, skip Ollama
-    'save_min_confidence': 0.90,  # only persist Ollama replies at/above this
+    'model': os.environ.get('OLLAMA_OCR_MODEL', 'gemma4:31b'),
+    'utrnet_min': 0.85,   # below this → discard (do not call Ollama)
+    'utrnet_high': 0.97,  # at/above this → trust UTRNet, skip Ollama
+    'save_min_confidence': 0.95,  # only persist Ollama replies at/above this
+    # Save crop + metadata when Ollama reply is below save_min (debug / review)
+    'save_rejected': True,
     'timeout_sec': 45.0,
     'max_image_width': 640,
-    'jpeg_quality': 70,
+    'jpeg_quality': 100,
     'keep_alive': '10m',
     'num_predict': 120,
     # Disable chain-of-thought so JSON fits in num_predict
@@ -332,8 +339,10 @@ LOGGING_CONFIG = {
 STORAGE_CONFIG = {
     'screenshots_dir': BASE_DIR / 'data' / 'screenshots',
     'audio_clips_dir': BASE_DIR / 'data' / 'audio',
-    # OCR region crops for debugging (raw always; enhanced only if ocr_enhance_crop)
+    # OCR region crops for debugging (raw always; preprocessed when ocr_preprocess != none)
     'ocr_crops_dir': BASE_DIR / 'data' / 'ocr_crops',
+    # Mid-band Ollama replies discarded for low confidence / empty text
+    'ollama_rejected_dir': BASE_DIR / 'data' / 'ollama_rejected',
     'max_storage_days': 30,  # Keep data for 30 days
     'cleanup_interval': 86400  # Clean up daily
 }

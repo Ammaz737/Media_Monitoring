@@ -270,6 +270,80 @@ def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
+def grab_stream_frame(
+    url: str,
+    timeout_sec: float = 20.0,
+) -> Tuple[Optional[np.ndarray], Optional[str]]:
+    """
+    Grab one BGR frame from RTSP/HTTP/YouTube.
+    Returns (frame, error_message). YouTube uses ffmpeg when available.
+    """
+    import time as _time
+
+    url = (url or "").strip()
+    if not url:
+        return None, "Stream URL is empty."
+
+    try:
+        resolved, err = resolve_stream_url(url)
+        if err:
+            return None, err
+        play_url = resolved
+    except Exception as e:
+        return None, str(e)
+
+    youtube = is_youtube_url(url)
+    deadline = _time.time() + (timeout_sec if youtube else min(timeout_sec, 12.0))
+
+    if youtube and ffmpeg_available():
+        reader = FfmpegFrameReader(play_url)
+        try:
+            reader.open()
+            best = None
+            while _time.time() < deadline:
+                ret, frame = reader.read()
+                if ret and frame is not None and getattr(frame, "size", 0) > 0:
+                    best = frame
+                    # One more read so HLS decoder settles on a real frame
+                    ret2, frame2 = reader.read()
+                    if ret2 and frame2 is not None and getattr(frame2, "size", 0) > 0:
+                        best = frame2
+                    break
+                _time.sleep(0.05)
+            if best is not None:
+                return best, None
+            return None, (
+                "YouTube stream opened but no video frames yet. "
+                "Try again in a few seconds."
+            )
+        except Exception as e:
+            logging.warning("ffmpeg YouTube snapshot failed: %s", e)
+        finally:
+            reader.release()
+
+    cap = cv2.VideoCapture(play_url, cv2.CAP_FFMPEG)
+    if not cap.isOpened():
+        cap.release()
+        return None, "Cannot open video stream for snapshot."
+    try:
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        best = None
+        for i in range(15 if youtube else 10):
+            if _time.time() > deadline:
+                break
+            ret, frame = cap.read()
+            if ret and frame is not None and getattr(frame, "size", 0) > 0:
+                best = frame
+                if i >= (3 if youtube else 2):
+                    break
+            _time.sleep(0.12 if youtube else 0.1)
+        if best is not None:
+            return best, None
+        return None, "Stream connected but no frames received for snapshot."
+    finally:
+        cap.release()
+
+
 class FfmpegFrameReader:
     """Read BGR frames via ffmpeg pipe (more reliable for YouTube HLS than OpenCV alone)."""
 

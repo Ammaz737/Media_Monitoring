@@ -79,6 +79,10 @@ class NewsMonitor:
         # Queues for processing
         self.frame_queue = queue.Queue(maxsize=PROCESSING_CONFIG['max_queue_size'])
         self.audio_queue = queue.Queue(maxsize=50)
+
+        # Latest frame for OCR region editor (YouTube/RTSP preview)
+        self._preview_lock = threading.Lock()
+        self._latest_preview_frame: Optional[np.ndarray] = None
         
         # Statistics and caching
         self.stats = {
@@ -104,6 +108,7 @@ class NewsMonitor:
         STORAGE_CONFIG['screenshots_dir'].mkdir(parents=True, exist_ok=True)
         STORAGE_CONFIG['audio_clips_dir'].mkdir(parents=True, exist_ok=True)
         STORAGE_CONFIG['ocr_crops_dir'].mkdir(parents=True, exist_ok=True)
+        STORAGE_CONFIG['ollama_rejected_dir'].mkdir(parents=True, exist_ok=True)
         (Path(__file__).parent / 'logs').mkdir(parents=True, exist_ok=True)
         (Path(__file__).parent / 'data').mkdir(parents=True, exist_ok=True)
     
@@ -277,6 +282,9 @@ class NewsMonitor:
         
         # Clear queues
         self._clear_queues()
+
+        with self._preview_lock:
+            self._latest_preview_frame = None
         
         logging.info("News monitoring stopped")
     
@@ -337,6 +345,13 @@ class NewsMonitor:
     def set_text_regions(self, regions: Optional[Dict]) -> None:
         """Hot-update OCR crop boxes for this channel (Settings editor)."""
         self.custom_text_regions = regions if isinstance(regions, dict) else None
+
+    def get_preview_frame(self) -> Optional[np.ndarray]:
+        """Copy of the most recent captured frame (for region-editor snapshots)."""
+        with self._preview_lock:
+            if self._latest_preview_frame is None:
+                return None
+            return self._latest_preview_frame.copy()
 
     def _clear_queues(self):
         """Clear processing queues"""
@@ -429,8 +444,11 @@ class NewsMonitor:
 
                 if current_time - last_frame_time >= frame_interval:
                     try:
+                        preview = frame.copy()
+                        with self._preview_lock:
+                            self._latest_preview_frame = preview
                         frame_data = {
-                            'frame': frame.copy(),
+                            'frame': preview,
                             'timestamp': datetime.now(),
                             'frame_time': current_time
                         }
@@ -591,7 +609,11 @@ class NewsMonitor:
                 utr_conf,
                 raw_text[:40],
             )
-            ollama_text, ollama_conf = ollama.refine(screenshot_image, draft_text=raw_text)
+            ollama_text, ollama_conf = ollama.refine(
+                screenshot_image,
+                draft_text=raw_text,
+                draft_confidence=utr_conf,
+            )
             save_min = ollama.save_min_confidence()
             if not ollama_text or ollama_conf < save_min:
                 logging.info(
@@ -601,6 +623,16 @@ class NewsMonitor:
                     utr_conf,
                     ollama_conf,
                     (ollama_text or raw_text)[:60],
+                )
+                self._save_ollama_rejected(
+                    screenshot_image,
+                    timestamp=timestamp,
+                    region_name=region_name,
+                    utr_conf=utr_conf,
+                    ollama_conf=ollama_conf,
+                    draft_text=raw_text,
+                    ollama_text=ollama_text or "",
+                    save_min=save_min,
                 )
                 return
             text = ollama_text
@@ -727,13 +759,16 @@ class NewsMonitor:
             )
             
             for region_name, result in extraction_results.items():
-                screenshot_image = frame
-                coords = result.get("region")
-                if coords and len(coords) == 4:
-                    x1, y1, x2, y2 = [int(v) for v in coords]
-                    crop = frame[y1:y2, x1:x2]
-                    if crop.size > 0:
-                        screenshot_image = crop
+                # Prefer the same preprocessed crop UTRNet used (clear_text_hd etc.)
+                screenshot_image = result.get("ocr_image")
+                if screenshot_image is None or getattr(screenshot_image, "size", 0) == 0:
+                    screenshot_image = frame
+                    coords = result.get("region")
+                    if coords and len(coords) == 4:
+                        x1, y1, x2, y2 = [int(v) for v in coords]
+                        crop = frame[y1:y2, x1:x2]
+                        if crop.size > 0:
+                            screenshot_image = crop
                 self._apply_region_extraction(
                     region_name=region_name,
                     result=result,
@@ -838,6 +873,62 @@ class NewsMonitor:
             return filepath
         except Exception as e:
             logging.error(f"Error saving region image: {e}")
+            return None
+
+    def _save_ollama_rejected(
+        self,
+        image: np.ndarray,
+        timestamp: datetime,
+        region_name: str,
+        utr_conf: float,
+        ollama_conf: float,
+        draft_text: str,
+        ollama_text: str,
+        save_min: float,
+    ) -> Optional[Path]:
+        """Persist crop + metadata for Ollama replies below save_min_confidence."""
+        if not OLLAMA_OCR_CONFIG.get("save_rejected", True):
+            return None
+        if image is None or getattr(image, "size", 0) == 0:
+            return None
+        try:
+            out_dir = Path(STORAGE_CONFIG["ollama_rejected_dir"])
+            out_dir.mkdir(parents=True, exist_ok=True)
+            safe_channel = "".join(
+                c if c.isalnum() or c in "-_" else "_" for c in (self.channel_name or "channel")
+            )
+            safe_region = "".join(
+                c if c.isalnum() or c in "-_" else "_" for c in (region_name or "region")
+            )
+            stamp = timestamp.strftime("%Y%m%d_%H%M%S_%f")
+            stem = (
+                f"{stamp}_{safe_region}_{safe_channel}"
+                f"_utr{utr_conf:.2f}_ollama{ollama_conf:.2f}"
+            )
+            img_path = out_dir / f"{stem}.jpg"
+            quality = int(OLLAMA_OCR_CONFIG.get("jpeg_quality", 95))
+            cv2.imwrite(str(img_path), image, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+            meta_path = out_dir / f"{stem}.json"
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "timestamp": timestamp.isoformat(),
+                        "channel": self.channel_name,
+                        "region": region_name,
+                        "utrnet_confidence": round(float(utr_conf), 4),
+                        "ollama_confidence": round(float(ollama_conf), 4),
+                        "save_min_confidence": float(save_min),
+                        "draft_text": draft_text,
+                        "ollama_text": ollama_text,
+                        "image": img_path.name,
+                    },
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            return img_path
+        except Exception as e:
+            logging.warning(f"Failed to save Ollama rejected crop ({region_name}): {e}")
             return None
 
     def _save_screenshot(self, frame: np.ndarray, timestamp: datetime, region_name: str) -> Optional[Path]:
