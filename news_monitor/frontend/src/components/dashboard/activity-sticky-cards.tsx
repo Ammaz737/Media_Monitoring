@@ -136,14 +136,25 @@ export function ExtractionStickyCard({ item }: { item: TextExtraction }) {
     <>
       <ActivityCardShell borderColor={meta.border} onView={() => setOpen(true)}>
         <div className="flex items-start justify-between gap-2">
-          <span
-            className={cn(
-              "rounded-full px-2.5 py-0.5 text-[0.75rem] font-bold capitalize",
-              meta.pill
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span
+              className={cn(
+                "rounded-full px-2.5 py-0.5 text-[0.75rem] font-bold capitalize",
+                meta.pill
+              )}
+            >
+              {item.region_name}
+            </span>
+            {(item.ocr_engine || "utrnet").toLowerCase() === "ollama" ? (
+              <span className="rounded-full bg-[#7C3AED] px-2.5 py-0.5 text-[0.7rem] font-bold text-white">
+                Ollama
+              </span>
+            ) : (
+              <span className="rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 py-0.5 text-[0.7rem] font-medium text-slate-600">
+                UTRNet
+              </span>
             )}
-          >
-            {item.region_name}
-          </span>
+          </div>
           <span className="shrink-0 text-[0.72rem] text-slate-400" dir="ltr">
             {formatTimestamp(item.timestamp)}
           </span>
@@ -171,6 +182,10 @@ export function ExtractionStickyCard({ item }: { item: TextExtraction }) {
           <p className="mb-2 text-sm text-slate-500" dir="ltr">
             {formatTimestamp(item.timestamp)} · {item.channel_name} ·{" "}
             <span className="capitalize">{item.region_name}</span>
+            {" · "}
+            {(item.ocr_engine || "utrnet").toLowerCase() === "ollama"
+              ? "Ollama"
+              : "UTRNet"}
           </p>
           {shotUrl && !imgFailed ? (
             <div className="mb-4 overflow-hidden rounded-xl border border-slate-200 bg-[#0F172A]">

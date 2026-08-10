@@ -21,7 +21,7 @@ export default function SearchPage() {
     end_date: searchParams.get("end_date") ?? "",
     channel: searchParams.get("channel") ?? "",
     region: searchParams.get("region") ?? "",
-    min_confidence: searchParams.get("min_confidence") ?? "",
+    min_confidence: searchParams.get("min_confidence") ?? "0.85",
   });
   const [textResults, setTextResults] = useState<TextExtraction[]>([]);
   const [audioResults, setAudioResults] = useState<AudioTranscription[]>([]);

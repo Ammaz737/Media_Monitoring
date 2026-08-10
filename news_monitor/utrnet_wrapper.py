@@ -7,13 +7,13 @@ import sys
 import os
 import math
 import re
+import hashlib
 from collections import Counter
-from datetime import datetime
 from pathlib import Path
 import torch
 import numpy as np
 from PIL import Image
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Set
 import cv2
 import logging
 
@@ -314,21 +314,17 @@ class UTRNetPredictor:
                 with self._infer_lock:
                     text, confidence = self.predict_single(ocr_input)
 
-                min_conf = region_config.get('min_confidence', 0.5)
-                if confidence >= min_conf and text.strip():
-                    results[region_name] = {
-                        'text': text.strip(),
-                        'confidence': confidence,
-                        'region': (x1, y1, x2, y2),
-                        'priority': region_config.get('priority', 'medium'),
-                    }
-                else:
-                    results[region_name] = {
-                        'text': '',
-                        'confidence': confidence,
-                        'region': (x1, y1, x2, y2),
-                        'priority': region_config.get('priority', 'medium'),
-                    }
+                # Always return prediction + confidence. Pipeline decides:
+                # high (≥98%) keep, mid (80–98%) Ollama refine, low discard.
+                results[region_name] = {
+                    'text': (text or '').strip(),
+                    'confidence': float(confidence),
+                    'region': (x1, y1, x2, y2),
+                    'priority': region_config.get('priority', 'medium'),
+                    'region_min_confidence': float(
+                        region_config.get('min_confidence', 0.5)
+                    ),
+                }
 
             except Exception as e:
                 logging.error(f"Error processing region {region_name}: {e}")
@@ -398,24 +394,51 @@ def _safe_filename_part(value: str, fallback: str = "unknown") -> str:
     return cleaned or fallback
 
 
+# Content hashes of OCR crops already written this process (avoids re-stat/re-write)
+_saved_ocr_crop_hashes: Set[str] = set()
+_saved_ocr_crop_hashes_lock = threading.Lock()
+
+
+def _ocr_crop_content_hash(region_img: np.ndarray) -> str:
+    """Stable MD5 of crop pixels (shape + dtype + bytes)."""
+    arr = np.ascontiguousarray(region_img)
+    h = hashlib.md5()
+    h.update(str(arr.shape).encode("ascii"))
+    h.update(str(arr.dtype).encode("ascii"))
+    h.update(arr.tobytes())
+    return h.hexdigest()
+
+
 def _save_ocr_crop(
     region_img: np.ndarray,
     region_name: str,
     channel_name: Optional[str] = None,
     suffix: str = "raw",
 ) -> Optional[Path]:
-    """Persist OCR region crops for debugging (raw frame cut and/or post-enhance)."""
+    """Persist OCR region crops for debugging; skip identical content by hash."""
     if not PROCESSING_CONFIG.get("save_ocr_crops", False):
         return None
     try:
+        content_hash = _ocr_crop_content_hash(region_img)
+        with _saved_ocr_crop_hashes_lock:
+            if content_hash in _saved_ocr_crop_hashes:
+                return None
+
         crops_dir = Path(STORAGE_CONFIG["ocr_crops_dir"])
         crops_dir.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         channel_part = _safe_filename_part(channel_name or "channel")
         region_part = _safe_filename_part(region_name, "region")
         stage = _safe_filename_part(suffix, "raw")
-        filepath = crops_dir / f"{stamp}_{channel_part}_{region_part}_{stage}.png"
+        # Hash-first name so identical crops map to one file across runs
+        filepath = crops_dir / f"{content_hash}_{channel_part}_{region_part}_{stage}.png"
+        if filepath.exists():
+            with _saved_ocr_crop_hashes_lock:
+                _saved_ocr_crop_hashes.add(content_hash)
+            return filepath
+
         cv2.imwrite(str(filepath), region_img)
+        with _saved_ocr_crop_hashes_lock:
+            _saved_ocr_crop_hashes.add(content_hash)
         return filepath
     except Exception as e:
         logging.warning(f"Failed to save OCR crop ({region_name}): {e}")
@@ -456,7 +479,7 @@ def region_likely_contains_text(region_img: np.ndarray) -> bool:
 def is_plausible_urdu_text(
     text: str, min_length: int = 6, min_long_words: int = 1
 ) -> bool:
-    """Reject OCR garbage: Latin junk, too short, or non-Urdu script."""
+    """Reject OCR garbage: too short, or not enough real Urdu script."""
     if not text:
         return False
 
@@ -468,7 +491,12 @@ def is_plausible_urdu_text(
     if urdu_chars < min_length:
         return False
 
-    if urdu_chars / max(len(compact), 1) < 0.7:
+    # Allow digits and Latin tokens in tickers; ratio uses Urdu vs other letters only
+    script_compact = re.sub(r"[\d.٪%٬:/\-A-Za-z@#]+", "", compact)
+    if script_compact and urdu_chars / max(len(script_compact), 1) < 0.7:
+        return False
+    # Still require a solid Urdu core (reject English-only UI garbage)
+    if urdu_chars / max(len(compact), 1) < 0.45:
         return False
 
     counts = Counter(compact)
@@ -488,19 +516,23 @@ def is_plausible_urdu_text(
 
 
 def clean_urdu_text(text: str) -> str:
-    """Clean and normalize extracted Urdu text"""
+    """Clean and normalize extracted ticker text (Urdu + digits + English words)."""
     if not text:
         return ""
     
     # Remove extra whitespace
     text = ' '.join(text.split())
-    
-    # Strip Latin/digits (YouTube UI, timestamps, watermarks)
-    text = re.sub(r"[A-Za-z0-9@#]+", " ", text)
 
-    # Remove isolated single characters (likely OCR errors)
+    # Keep Urdu, digits, and Latin words (e.g. highest, KSE). Drop only @#
+    text = re.sub(r"[@#]+", " ", text)
+    text = ' '.join(text.split())
+
+    # Remove isolated single characters (likely OCR errors); keep digits and letters
     words = text.split()
-    cleaned_words = [word for word in words if len(word) > 1 or word in ['و', 'ا']]
+    cleaned_words = [
+        word for word in words
+        if len(word) > 1 or word in ['و', 'ا'] or word.isdigit()
+    ]
 
     return ' '.join(cleaned_words)
 

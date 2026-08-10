@@ -120,10 +120,13 @@ DATABASE_CONFIG = {
 
 # Processing Configuration
 PROCESSING_CONFIG = {
-    'frame_interval': 2.0,  # Process every 2 seconds
+    'frame_interval': 2.0,  # Capture + OCR one frame every 2 seconds
     'batch_size': 4,
+    # How many queued frames to OCR per processing tick (1 = steady ~2s cadence)
+    'ocr_frames_per_tick': 1,
     'max_queue_size': 100,
-    'ocr_confidence_threshold': 0.5,
+    # App-wide floor: discard low-confidence OCR before DB / UI
+    'ocr_confidence_threshold': 0.85,
     'min_urdu_text_length': 6,
     # Skip OCR entirely for stub/disabled regions (draw tiny boxes in Settings to ignore)
     'min_region_height_px': 22,
@@ -133,6 +136,27 @@ PROCESSING_CONFIG = {
     'save_ocr_crops': True,
     # If False, pass the raw crop to UTRNet (skip CLAHE/Otsu enhance — often better for TV tickers)
     'ocr_enhance_crop': False,
+}
+
+# Ollama vision OCR fallback for mid-confidence UTRNet results
+# Band: utrnet_min <= confidence < utrnet_high → ask Ollama; only keep high-confidence replies
+OLLAMA_OCR_CONFIG = {
+    'enabled': True,
+    'base_url': os.environ.get('OLLAMA_HOST', 'http://127.0.0.1:11434').rstrip('/'),
+    # Prefer a vision model that fits beside UTRNet on 16GB (qwen3.6:latest is ~23GB)
+    'model': os.environ.get('OLLAMA_OCR_MODEL', 'qwen3-vl:8b'),
+    'utrnet_min': 0.80,   # below this → discard (do not call Ollama)
+    'utrnet_high': 0.95,  # at/above this → trust UTRNet, skip Ollama
+    'save_min_confidence': 0.90,  # only persist Ollama replies at/above this
+    'timeout_sec': 45.0,
+    'max_image_width': 640,
+    'jpeg_quality': 70,
+    'keep_alive': '10m',
+    'num_predict': 120,
+    # Disable chain-of-thought so JSON fits in num_predict
+    'think': False,
+    # Drop refine if another call is in flight (avoid backlog / stall)
+    'skip_if_busy': True,
 }
 
 # Auto-start RTSP monitoring when Flask boots.

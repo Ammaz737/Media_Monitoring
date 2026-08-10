@@ -18,6 +18,7 @@ import numpy as np
 from config import (
     WEB_CONFIG, ALERTS_CONFIG, RTSP_URL, RTSP_CHANNELS, DEFAULT_RTSP_CHANNELS,
     TEXT_REGIONS, YOUTUBE_TEXT_REGIONS, PROCESSING_CONFIG, SPEECH_CONFIG, UTRNET_CONFIG,
+    OLLAMA_OCR_CONFIG,
     STORAGE_CONFIG, save_runtime_config, AUTO_START_MONITORING, apply_rtsp_channels,
     normalize_text_regions, default_text_regions_for_url,
 )
@@ -714,6 +715,9 @@ def api_config():
             'processing': PROCESSING_CONFIG,
             'speech': SPEECH_CONFIG,
             'utrnet': {k: v for k, v in UTRNET_CONFIG.items() if k != 'device_id'},
+            'ollama_ocr': {
+                k: v for k, v in OLLAMA_OCR_CONFIG.items()
+            },
             'alerts': {
                 'enabled': ALERTS_CONFIG.get('enabled', True),
                 'keywords': keywords,

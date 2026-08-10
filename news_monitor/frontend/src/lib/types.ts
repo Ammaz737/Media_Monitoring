@@ -9,6 +9,8 @@ export interface TextExtraction {
   region_coords?: string;
   frame_hash?: string;
   screenshot_path?: string;
+  /** utrnet | ollama — which engine produced the saved text */
+  ocr_engine?: string;
 }
 
 export interface AudioTranscription {
@@ -126,6 +128,7 @@ export interface AppConfig {
   processing: Record<string, number | boolean>;
   speech: Record<string, unknown>;
   utrnet: Record<string, unknown>;
+  ollama_ocr?: Record<string, unknown>;
   alerts: {
     enabled: boolean;
     keywords: string[];

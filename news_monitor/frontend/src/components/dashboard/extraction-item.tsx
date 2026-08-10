@@ -33,9 +33,20 @@ export function ExtractionItem({ item }: { item: TextExtraction }) {
         )}
       >
         <div className="mb-2 flex items-start justify-between gap-2">
-          <Badge variant={getRegionBadgeVariant(item.region_name)}>
-            {item.region_name}
-          </Badge>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Badge variant={getRegionBadgeVariant(item.region_name)}>
+              {item.region_name}
+            </Badge>
+            {(item.ocr_engine || "utrnet").toLowerCase() === "ollama" ? (
+              <Badge className="bg-[#7C3AED] text-[10px] text-white hover:bg-[#7C3AED]">
+                Ollama
+              </Badge>
+            ) : (
+              <Badge variant="secondary" className="text-[10px]">
+                UTRNet
+              </Badge>
+            )}
+          </div>
           <span className="shrink-0 text-xs text-slate-400" dir="ltr">
             {formatTimestamp(item.timestamp)}
           </span>
@@ -81,6 +92,10 @@ export function ExtractionItem({ item }: { item: TextExtraction }) {
           <p className="mb-2 text-sm text-slate-500" dir="ltr">
             {formatTimestamp(item.timestamp)} · {item.channel_name} ·{" "}
             <span className="capitalize">{item.region_name}</span>
+            {" · "}
+            {(item.ocr_engine || "utrnet").toLowerCase() === "ollama"
+              ? "Ollama"
+              : "UTRNet"}
           </p>
           {shotUrl && !imgFailed ? (
             <div className="mb-4 overflow-hidden rounded-xl border border-slate-200 bg-[#0F172A]">

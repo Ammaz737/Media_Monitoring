@@ -47,6 +47,7 @@ class NewsDatabase:
                     frame_hash TEXT,
                     screenshot_path TEXT,
                     channel_name TEXT DEFAULT 'unknown',
+                    ocr_engine TEXT DEFAULT 'utrnet',
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -133,6 +134,14 @@ class NewsDatabase:
                     """
                 )
             
+            # OCR engine tag (utrnet | ollama) for dashboard badges
+            cursor.execute("PRAGMA table_info(text_extractions)")
+            text_cols = {row[1] for row in cursor.fetchall()}
+            if "ocr_engine" not in text_cols:
+                cursor.execute(
+                    "ALTER TABLE text_extractions ADD COLUMN ocr_engine TEXT DEFAULT 'utrnet'"
+                )
+
             # Create indices for alerts
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_type ON alerts(alert_type)")
@@ -192,7 +201,8 @@ class NewsDatabase:
                              region_coords: Tuple[int, int, int, int] = None,
                              frame_hash: str = None,
                              screenshot_path: str = None,
-                             channel_name: str = 'unknown') -> str:
+                             channel_name: str = 'unknown',
+                             ocr_engine: str = 'utrnet') -> str:
         """
         Insert a text extraction record
         
@@ -201,6 +211,9 @@ class NewsDatabase:
         """
         record_uuid = str(uuid.uuid4())
         timestamp = datetime.now()
+        engine = (ocr_engine or 'utrnet').strip().lower()
+        if engine not in ('utrnet', 'ollama'):
+            engine = 'utrnet'
         
         with self.lock:
             try:
@@ -210,12 +223,13 @@ class NewsDatabase:
                     cursor.execute("""
                         INSERT INTO text_extractions 
                         (uuid, timestamp, region_name, extracted_text, confidence, 
-                         priority, region_coords, frame_hash, screenshot_path, channel_name)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         priority, region_coords, frame_hash, screenshot_path, channel_name,
+                         ocr_engine)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         record_uuid, timestamp, region_name, text, confidence,
                         priority, json.dumps(region_coords) if region_coords else None,
-                        frame_hash, screenshot_path, channel_name
+                        frame_hash, screenshot_path, channel_name, engine
                     ))
                     
                     conn.commit()

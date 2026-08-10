@@ -18,6 +18,7 @@ import json
 from config import (
     RTSP_CHANNELS, RTSP_URL, TEXT_REGIONS, YOUTUBE_TEXT_REGIONS,
     PROCESSING_CONFIG, STORAGE_CONFIG, ALERTS_CONFIG, SPEECH_CONFIG,
+    OLLAMA_OCR_CONFIG,
     normalize_text_regions,
 )
 from utrnet_wrapper import (
@@ -27,6 +28,7 @@ from utrnet_wrapper import (
     calculate_text_similarity,
     is_plausible_urdu_text,
 )
+from ollama_ocr import OllamaVisionOcr, SharedOllamaOcrService
 from speech_transcription import RealtimeSpeechTranscriber, extract_audio_from_rtsp, save_audio_chunk
 from database import NewsDatabase
 from alert_system import AlertSystem
@@ -50,6 +52,7 @@ class NewsMonitor:
         speech_enabled: bool = True,
         text_regions: Dict = None,
         shared_ocr: Optional[SharedOcrService] = None,
+        shared_ollama: Optional[SharedOllamaOcrService] = None,
     ):
         self.source_url = (rtsp_url or RTSP_URL).strip()
         self.rtsp_url = self.source_url
@@ -58,9 +61,11 @@ class NewsMonitor:
         self.stream_error: Optional[str] = None
         self.custom_text_regions = text_regions if isinstance(text_regions, dict) else None
         self.shared_ocr = shared_ocr
+        self.shared_ollama = shared_ollama
         self._owns_utr_predictor = shared_ocr is None
 
         self.utr_predictor = None
+        self.ollama_ocr: Optional[OllamaVisionOcr] = None
         self.speech_transcriber = None
         self.database = NewsDatabase()
         self.alert_system = AlertSystem(self.database)
@@ -123,6 +128,18 @@ class NewsMonitor:
                     logging.info(
                         "Standalone UTRNet loaded for %s",
                         self.channel_name,
+                    )
+
+            if self.ollama_ocr is None and OLLAMA_OCR_CONFIG.get("enabled", True):
+                if self.shared_ollama is not None:
+                    self.ollama_ocr = self.shared_ollama.ensure_loaded()
+                    logging.info("Attached shared Ollama OCR for %s", self.channel_name)
+                else:
+                    self.ollama_ocr = OllamaVisionOcr()
+                    logging.info(
+                        "Standalone Ollama OCR ready for %s (model=%s)",
+                        self.channel_name,
+                        OLLAMA_OCR_CONFIG.get("model"),
                     )
 
             if load_speech:
@@ -541,23 +558,85 @@ class NewsMonitor:
         source_label: str = "frame",
     ) -> None:
         """Store OCR result, alerts, and cache updates for one region."""
-        if not result.get("text") or result["confidence"] < PROCESSING_CONFIG["ocr_confidence_threshold"]:
+        raw_text = (result.get("text") or "").strip()
+        utr_conf = float(result.get("confidence") or 0.0)
+        ollama = self.ollama_ocr
+
+        # Low UTRNet confidence → discard (do not call Ollama)
+        if ollama is not None and ollama.utrnet_is_low(utr_conf):
+            return
+        if ollama is None and (
+            not raw_text or utr_conf < PROCESSING_CONFIG["ocr_confidence_threshold"]
+        ):
             return
 
-        cleaned_text = clean_urdu_text(result["text"])
+        text = raw_text
+        confidence = utr_conf
+        source = "utrnet"
+
+        # Mid band (80% ≤ conf < 98%) → Ollama vision refine; only keep high-conf replies
+        if ollama is not None and ollama.utrnet_needs_ollama(utr_conf):
+            if screenshot_image is None or getattr(screenshot_image, "size", 0) == 0:
+                logging.info(
+                    "Ollama skip (%s/%s): mid-conf utr=%.3f but no crop image",
+                    source_label,
+                    region_name,
+                    utr_conf,
+                )
+                return
+            logging.info(
+                "Ollama refine start (%s/%s): utr=%.3f draft=%s…",
+                source_label,
+                region_name,
+                utr_conf,
+                raw_text[:40],
+            )
+            ollama_text, ollama_conf = ollama.refine(screenshot_image, draft_text=raw_text)
+            save_min = ollama.save_min_confidence()
+            if not ollama_text or ollama_conf < save_min:
+                logging.info(
+                    "Discarded mid-conf OCR after Ollama (%s/%s utr=%.2f ollama=%.2f): %s",
+                    source_label,
+                    region_name,
+                    utr_conf,
+                    ollama_conf,
+                    (ollama_text or raw_text)[:60],
+                )
+                return
+            text = ollama_text
+            confidence = ollama_conf
+            source = "ollama"
+        elif ollama is not None and ollama.utrnet_is_high(utr_conf):
+            if not raw_text:
+                return
+            # High-confidence UTRNet still must clear the app floor
+            if confidence < PROCESSING_CONFIG["ocr_confidence_threshold"]:
+                return
+        elif ollama is None:
+            pass
+        else:
+            # Outside expected bands with ollama enabled
+            return
+
+        cleaned_text = clean_urdu_text(text)
         youtube = is_youtube_url(self.source_url)
         min_len = 10 if youtube else PROCESSING_CONFIG.get("min_urdu_text_length", 6)
         min_long = 2 if youtube else 1
         if not is_plausible_urdu_text(cleaned_text, min_length=min_len, min_long_words=min_long):
             logging.info(
-                "Skipped low-quality OCR (%s/%s): %s",
+                "Skipped low-quality OCR (%s/%s/%s): %s",
                 source_label,
                 region_name,
+                source,
                 cleaned_text[:60],
             )
             return
 
         if not cleaned_text or self._is_duplicate_text(cleaned_text, region_name):
+            return
+
+        # Final app gate: discard low confidences
+        if confidence < PROCESSING_CONFIG["ocr_confidence_threshold"]:
             return
 
         screenshot_path = None
@@ -567,12 +646,13 @@ class NewsMonitor:
         extraction_uuid = self.database.insert_text_extraction(
             region_name=region_name,
             text=cleaned_text,
-            confidence=result["confidence"],
+            confidence=confidence,
             priority=result["priority"],
             region_coords=result["region"],
             frame_hash=frame_hash,
             screenshot_path=str(screenshot_path) if screenshot_path else None,
             channel_name=self.channel_name,
+            ocr_engine=source,
         )
 
         if extraction_uuid:
@@ -580,28 +660,45 @@ class NewsMonitor:
             self._check_text_alerts(extraction_uuid, cleaned_text)
             self.text_cache[f"{region_name}:{cleaned_text[:50]}"] = time.time()
             logging.info(
-                "Extracted text from %s (%s): %s…",
+                "Extracted text from %s (%s/%s conf=%.2f): %s…",
                 region_name,
                 source_label,
+                source,
+                confidence,
                 cleaned_text[:100],
             )
     
     def _process_video_frames(self):
-        """Process queued video frames for text extraction"""
+        """Process queued video frames for text extraction (~1 every frame_interval)."""
+        # Keep cadence close to capture interval; avoid bursting a backlog of 4 at once
+        max_frames = max(1, int(PROCESSING_CONFIG.get("ocr_frames_per_tick", 1)))
         frames_to_process = []
-        
-        # Collect frames for batch processing
-        while len(frames_to_process) < PROCESSING_CONFIG['batch_size']:
+
+        while len(frames_to_process) < max_frames:
             try:
                 frame_data = self.frame_queue.get(timeout=0.1)
                 frames_to_process.append(frame_data)
             except queue.Empty:
                 break
-        
+
         if not frames_to_process:
             return
-        
-        # Process frames
+
+        # Drop stale backlog so OCR stays near live (every ~2s), not minutes behind
+        dropped = 0
+        while self.frame_queue.qsize() > 1:
+            try:
+                self.frame_queue.get_nowait()
+                dropped += 1
+            except queue.Empty:
+                break
+        if dropped:
+            logging.debug(
+                "Dropped %s stale queued frames on %s to keep 2s OCR live",
+                dropped,
+                self.channel_name,
+            )
+
         for frame_data in frames_to_process:
             self._process_single_frame(frame_data)
             self.stats['frames_processed'] += 1
@@ -613,10 +710,10 @@ class NewsMonitor:
         
         try:
             frame_hash = self._calculate_frame_hash(frame)
-            
+
+            # Skip unchanged frames — avoids duplicate OCR/crops/DB rows
             if frame_hash == self.last_frame_hash:
                 return
-            
             self.last_frame_hash = frame_hash
 
             regions = self._get_text_regions()
@@ -858,6 +955,7 @@ class MultiChannelNewsMonitor:
         self.is_running = False
         self.alert_system = AlertSystem(self.database)
         self.shared_ocr = SharedOcrService()
+        self.shared_ollama = SharedOllamaOcrService()
         # Channel id that owns the shared Whisper / audio-capture thread
         self._speech_channel_id: Optional[str] = None
 
@@ -865,7 +963,7 @@ class MultiChannelNewsMonitor:
         self._initialize_monitors()
 
         logging.info(
-            "Multi-channel monitor initialized with %s channels (shared OCR)",
+            "Multi-channel monitor initialized with %s channels (shared OCR + Ollama)",
             len(self.monitors),
         )
 
@@ -877,6 +975,7 @@ class MultiChannelNewsMonitor:
             speech_enabled=False,
             text_regions=config.get("text_regions"),
             shared_ocr=self.shared_ocr,
+            shared_ollama=self.shared_ollama,
         )
 
     def _initialize_monitors(self):
@@ -926,6 +1025,8 @@ class MultiChannelNewsMonitor:
             try:
                 logging.info("Loading shared UTRNet for all channels…")
                 self.shared_ocr.ensure_loaded()
+                if OLLAMA_OCR_CONFIG.get("enabled", True):
+                    self.shared_ollama.ensure_loaded()
             except Exception as e:
                 logging.error("Shared OCR failed to load: %s", e)
                 self.is_running = False
