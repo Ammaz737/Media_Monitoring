@@ -89,7 +89,7 @@ export function getFallbackAppConfig(): AppConfig {
     },
     speech: {
       enabled: true,
-      model: "openai/whisper-small",
+      model: "openai/whisper-large-v3-turbo",
       chunk_duration: 30,
     },
     utrnet: {

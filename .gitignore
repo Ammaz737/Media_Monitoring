@@ -13,6 +13,7 @@ venv/
 # App data & models (download / generate locally)
 news_monitor/data/*.db
 news_monitor/data/screenshots/
+news_monitor/data/ocr_crops/
 news_monitor/data/audio/
 news_monitor/data/runtime_config.json
 news_monitor/logs/

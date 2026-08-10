@@ -72,17 +72,26 @@ class SpeechTranscriber:
         if not WHISPER_AVAILABLE:
             raise ImportError("Whisper not available")
         
-        # Extract model size from model name
-        if 'large' in self.model_name:
+        # Extract model size from model name (check specific sizes before generic ones)
+        name = self.model_name.lower()
+        if 'large-v3-turbo' in name or name.endswith('/turbo') or name.endswith('turbo'):
+            model_size = 'large-v3-turbo'
+        elif 'large-v3' in name:
+            model_size = 'large-v3'
+        elif 'large-v2' in name:
+            model_size = 'large-v2'
+        elif 'large' in name:
             model_size = 'large'
-        elif 'medium' in self.model_name:
+        elif 'medium' in name:
             model_size = 'medium'
-        elif 'small' in self.model_name:
+        elif 'small' in name:
             model_size = 'small'
-        elif 'base' in self.model_name:
+        elif 'base' in name:
             model_size = 'base'
+        elif 'tiny' in name:
+            model_size = 'tiny'
         else:
-            model_size = 'small'  # Default
+            model_size = 'large-v3-turbo'
         
         self.model = whisper.load_model(model_size, device=self.device)
         self.model_type = 'whisper'

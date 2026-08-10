@@ -125,8 +125,12 @@ PROCESSING_CONFIG = {
     'max_queue_size': 100,
     'ocr_confidence_threshold': 0.5,
     'min_urdu_text_length': 6,
+    # Skip OCR entirely for stub/disabled regions (draw tiny boxes in Settings to ignore)
     'min_region_height_px': 22,
-    'duplicate_text_threshold': 0.8  # Similarity threshold to avoid duplicates
+    'min_region_width_px': 80,
+    'duplicate_text_threshold': 0.8,  # Similarity threshold to avoid duplicates
+    # Save the exact region crops fed into UTRNet (after enhance) for debugging
+    'save_ocr_crops': True,
 }
 
 # Auto-start RTSP monitoring when Flask boots.
@@ -137,7 +141,7 @@ AUTO_START_MONITORING = True
 # Speech Recognition Configuration
 SPEECH_CONFIG = {
     'enabled': True,
-    'model': 'openai/whisper-small',  # Can use wav2vec2-xlsr-53-urdu as well
+    'model': 'openai/whisper-large-v3-turbo',  # Can use wav2vec2-xlsr-53-urdu as well
     'chunk_duration': 30,  # seconds
     'overlap': 5,  # seconds
     'sample_rate': 16000
@@ -302,6 +306,8 @@ LOGGING_CONFIG = {
 STORAGE_CONFIG = {
     'screenshots_dir': BASE_DIR / 'data' / 'screenshots',
     'audio_clips_dir': BASE_DIR / 'data' / 'audio',
+    # Exact crops sent to UTRNet (post-enhance) — separate from full-frame screenshots
+    'ocr_crops_dir': BASE_DIR / 'data' / 'ocr_crops',
     'max_storage_days': 30,  # Keep data for 30 days
     'cleanup_interval': 86400  # Clean up daily
 }

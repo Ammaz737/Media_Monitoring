@@ -90,6 +90,7 @@ class NewsMonitor:
         """Create necessary directories"""
         STORAGE_CONFIG['screenshots_dir'].mkdir(parents=True, exist_ok=True)
         STORAGE_CONFIG['audio_clips_dir'].mkdir(parents=True, exist_ok=True)
+        STORAGE_CONFIG['ocr_crops_dir'].mkdir(parents=True, exist_ok=True)
         (Path(__file__).parent / 'logs').mkdir(parents=True, exist_ok=True)
         (Path(__file__).parent / 'data').mkdir(parents=True, exist_ok=True)
     
@@ -547,7 +548,9 @@ class NewsMonitor:
             
             # Extract text from different regions
             extraction_results = self.utr_predictor.extract_text_regions(
-                frame, self._get_text_regions()
+                frame,
+                self._get_text_regions(),
+                channel_name=self.channel_name,
             )
             
             # Process each region's results

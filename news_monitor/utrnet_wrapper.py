@@ -8,6 +8,8 @@ import os
 import math
 import re
 from collections import Counter
+from datetime import datetime
+from pathlib import Path
 import torch
 import numpy as np
 from PIL import Image
@@ -26,7 +28,13 @@ except ImportError as e:
     logging.error(f"Failed to import UTRNet modules: {e}")
     sys.exit(1)
 
-from config import UTRNET_CONFIG, WEIGHTS_PATH, URDU_GLYPHS_PATH, PROCESSING_CONFIG
+from config import (
+    UTRNET_CONFIG,
+    WEIGHTS_PATH,
+    URDU_GLYPHS_PATH,
+    PROCESSING_CONFIG,
+    STORAGE_CONFIG,
+)
 import threading
 
 _ARABIC_URDU_RE = re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]")
@@ -243,13 +251,19 @@ class UTRNetPredictor:
             logging.error(f"Error in batch prediction: {e}")
             return [("", 0.0) for _ in images]
     
-    def extract_text_regions(self, frame: np.ndarray, regions: dict) -> dict:
+    def extract_text_regions(
+        self,
+        frame: np.ndarray,
+        regions: dict,
+        channel_name: Optional[str] = None,
+    ) -> dict:
         """
         Extract text from specific regions of the frame (tickers, headlines, etc.)
         
         Args:
             frame: Input video frame
             regions: Dictionary of region definitions
+            channel_name: Optional channel label used when saving debug crops
         
         Returns:
             Dictionary with region names as keys and extraction results as values
@@ -265,13 +279,20 @@ class UTRNetPredictor:
                 
                 # Extract region
                 region_img = frame[y1:y2, x1:x2]
-                min_h = PROCESSING_CONFIG.get('min_region_height_px', 22)
-                if region_img.size == 0 or region_img.shape[0] < min_h:
+                min_h = int(PROCESSING_CONFIG.get('min_region_height_px', 22))
+                min_w = int(PROCESSING_CONFIG.get('min_region_width_px', 80))
+                # Tiny Settings boxes (disabled headline/side) → no enhance / save / OCR
+                if (
+                    region_img.size == 0
+                    or region_img.shape[0] < min_h
+                    or region_img.shape[1] < min_w
+                ):
                     results[region_name] = {
                         'text': '',
                         'confidence': 0.0,
                         'region': (x1, y1, x2, y2),
                         'priority': region_config.get('priority', 'medium'),
+                        'skipped': 'too_small',
                     }
                     continue
 
@@ -284,7 +305,10 @@ class UTRNetPredictor:
                     }
                     continue
 
+                # Raw frame crop (pre-enhance) + post-enhance model input
+                _save_ocr_crop(region_img, region_name, channel_name, suffix="raw")
                 region_img = enhance_region_for_ocr(region_img)
+                _save_ocr_crop(region_img, region_name, channel_name, suffix="enhanced")
                 with self._infer_lock:
                     text, confidence = self.predict_single(region_img)
 
@@ -321,6 +345,36 @@ class UTRNetPredictor:
             del self.model
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
         logging.info("UTRNet resources cleaned up")
+
+
+def _safe_filename_part(value: str, fallback: str = "unknown") -> str:
+    cleaned = re.sub(r"[^\w\-]+", "_", (value or "").strip(), flags=re.UNICODE)
+    cleaned = cleaned.strip("_")
+    return cleaned or fallback
+
+
+def _save_ocr_crop(
+    region_img: np.ndarray,
+    region_name: str,
+    channel_name: Optional[str] = None,
+    suffix: str = "raw",
+) -> Optional[Path]:
+    """Persist OCR region crops for debugging (raw frame cut and/or post-enhance)."""
+    if not PROCESSING_CONFIG.get("save_ocr_crops", False):
+        return None
+    try:
+        crops_dir = Path(STORAGE_CONFIG["ocr_crops_dir"])
+        crops_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        channel_part = _safe_filename_part(channel_name or "channel")
+        region_part = _safe_filename_part(region_name, "region")
+        stage = _safe_filename_part(suffix, "raw")
+        filepath = crops_dir / f"{stamp}_{channel_part}_{region_part}_{stage}.png"
+        cv2.imwrite(str(filepath), region_img)
+        return filepath
+    except Exception as e:
+        logging.warning(f"Failed to save OCR crop ({region_name}): {e}")
+        return None
 
 
 # Utility functions for text processing
