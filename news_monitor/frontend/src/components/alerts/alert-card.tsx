@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Check, Clock, Eye, Newspaper } from "lucide-react";
+import { Check, Clock, Eye, Newspaper, Tv } from "lucide-react";
 import type { Alert } from "@/lib/types";
 import {
   cn,
@@ -10,6 +10,7 @@ import {
   parseKeywords,
 } from "@/lib/utils";
 import { AlertViewModal } from "@/components/alerts/alert-view-modal";
+import { Badge } from "@/components/ui/badge";
 
 interface AlertCardProps {
   item: Alert;
@@ -118,7 +119,18 @@ export function AlertCard({ item, onMarkRead }: AlertCardProps) {
               <Newspaper className="h-5 w-5" strokeWidth={2} />
             </div>
             <div className="flex min-w-0 flex-col gap-1">
-              <p className="text-[0.72rem] text-slate-400">keyword match</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-[0.72rem] text-slate-400">keyword match</p>
+                {item.channel_name && item.channel_name !== "unknown" && (
+                  <Badge
+                    variant="channel"
+                    className="inline-flex max-w-[160px] items-center gap-1 truncate text-[0.68rem] normal-case"
+                  >
+                    <Tv className="h-3 w-3 shrink-0" />
+                    <span className="truncate">{item.channel_name}</span>
+                  </Badge>
+                )}
+              </div>
               <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                 {visibleKw.map((kw, i) => (
                   <MatchKeywordPill
@@ -162,15 +174,10 @@ export function AlertCard({ item, onMarkRead }: AlertCardProps) {
 
         {/* Bottom row */}
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-          <div className="min-w-0">
-            <p className="flex items-center gap-1.5 text-[0.75rem] text-slate-400">
-              <Clock className="h-3.5 w-3.5 shrink-0" />
-              {formatTimestamp(item.timestamp)}
-            </p>
-            <p className="mt-0.5 max-w-[120px] truncate font-mono text-[0.7rem] text-slate-300">
-              {item.uuid}
-            </p>
-          </div>
+          <p className="flex min-w-0 items-center gap-1.5 text-[0.75rem] text-slate-400">
+            <Clock className="h-3.5 w-3.5 shrink-0" />
+            {formatTimestamp(item.timestamp)}
+          </p>
 
           <div className="flex w-full flex-wrap gap-2 sm:w-auto">
             <button

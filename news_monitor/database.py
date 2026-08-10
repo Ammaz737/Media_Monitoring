@@ -89,14 +89,57 @@ class NewsDatabase:
                     alert_text TEXT NOT NULL,
                     severity TEXT DEFAULT 'medium',
                     is_read BOOLEAN DEFAULT FALSE,
+                    channel_name TEXT DEFAULT 'unknown',
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
+            # Migrate older DBs that lack channel_name on alerts
+            cursor.execute("PRAGMA table_info(alerts)")
+            alert_cols = {row[1] for row in cursor.fetchall()}
+            if "channel_name" not in alert_cols:
+                cursor.execute(
+                    "ALTER TABLE alerts ADD COLUMN channel_name TEXT DEFAULT 'unknown'"
+                )
+                # Backfill from linked text / audio rows when possible
+                cursor.execute(
+                    """
+                    UPDATE alerts
+                    SET channel_name = (
+                        SELECT te.channel_name FROM text_extractions te
+                        WHERE te.uuid = alerts.content_id
+                    )
+                    WHERE content_type = 'text'
+                      AND (channel_name IS NULL OR channel_name = '' OR channel_name = 'unknown')
+                      AND EXISTS (
+                          SELECT 1 FROM text_extractions te
+                          WHERE te.uuid = alerts.content_id AND te.channel_name IS NOT NULL
+                      )
+                    """
+                )
+                cursor.execute(
+                    """
+                    UPDATE alerts
+                    SET channel_name = (
+                        SELECT at.channel_name FROM audio_transcriptions at
+                        WHERE at.uuid = alerts.content_id
+                    )
+                    WHERE content_type = 'audio'
+                      AND (channel_name IS NULL OR channel_name = '' OR channel_name = 'unknown')
+                      AND EXISTS (
+                          SELECT 1 FROM audio_transcriptions at
+                          WHERE at.uuid = alerts.content_id AND at.channel_name IS NOT NULL
+                      )
+                    """
+                )
             
             # Create indices for alerts
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_type ON alerts(alert_type)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_read ON alerts(is_read)")
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_alerts_channel ON alerts(channel_name)"
+            )
             
             # Channel metadata table (source of truth for RTSP stream configs)
             cursor.execute("""
@@ -226,7 +269,8 @@ class NewsDatabase:
                      content_id: str,
                      matched_keywords: List[str],
                      alert_text: str,
-                     severity: str = 'medium') -> str:
+                     severity: str = 'medium',
+                     channel_name: str = 'unknown') -> str:
         """
         Insert an alert record
         
@@ -244,11 +288,12 @@ class NewsDatabase:
                     cursor.execute("""
                         INSERT INTO alerts 
                         (uuid, timestamp, alert_type, content_type, content_id,
-                         matched_keywords, alert_text, severity)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                         matched_keywords, alert_text, severity, channel_name)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         record_uuid, timestamp, alert_type, content_type, content_id,
-                        json.dumps(matched_keywords), alert_text, severity
+                        json.dumps(matched_keywords), alert_text, severity,
+                        channel_name or 'unknown',
                     ))
                     
                     conn.commit()
@@ -852,6 +897,7 @@ class NewsDatabase:
                 matched_keywords=matched,
                 alert_text=text[:500],
                 severity='high' if any(kw in ['عاجل', 'breaking'] for kw in matched) else 'medium',
+                channel_name=row.get('channel_name') or 'unknown',
             )
             if alert_uuid:
                 created += 1

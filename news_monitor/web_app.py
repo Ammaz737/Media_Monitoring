@@ -3,7 +3,7 @@ Web Frontend Dashboard for News Monitor
 Flask-based web application for monitoring and searching news content
 """
 
-from flask import Flask, render_template, request, jsonify, Response, send_file
+from flask import Flask, render_template, request, jsonify, Response, send_file, send_from_directory, abort
 import json
 import logging
 from datetime import datetime, timedelta
@@ -165,6 +165,19 @@ def _encode_jpeg(frame: np.ndarray, quality: int = 82) -> bytes:
     if not ok:
         raise RuntimeError('JPEG encode failed')
     return buf.tobytes()
+
+
+@app.route('/api/screenshots/<path:filename>')
+def api_serve_screenshot(filename: str):
+    """Serve OCR / ticker screenshot images by basename only."""
+    safe_name = Path(filename).name
+    if not safe_name or safe_name != filename.replace("\\", "/").split("/")[-1]:
+        abort(400)
+    shots_dir = Path(STORAGE_CONFIG['screenshots_dir']).resolve()
+    target = (shots_dir / safe_name).resolve()
+    if not str(target).startswith(str(shots_dir)) or not target.is_file():
+        abort(404)
+    return send_from_directory(shots_dir, safe_name)
 
 
 refresh_rtsp_channels_cache()

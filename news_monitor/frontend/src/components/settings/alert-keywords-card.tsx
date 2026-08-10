@@ -56,10 +56,10 @@ function KeywordPill({
       role="listitem"
       dir={isUrdu ? "rtl" : "ltr"}
       className={cn(
-        "inline-flex h-8 max-w-full items-center gap-2 rounded-full py-0 pl-3.5 pr-2 text-sm font-medium text-white shadow-[0_1px_3px_rgba(30,64,175,0.3)] transition-all duration-150 ease-out",
+        "inline-flex max-w-full items-center gap-2.5 overflow-visible rounded-full pl-4 pr-2.5 text-sm font-medium text-white shadow-[0_1px_3px_rgba(30,64,175,0.3)] transition-all duration-150 ease-out",
         isUrdu
-          ? "bg-gradient-to-br from-[#065F46] to-[#059669] shadow-[0_1px_3px_rgba(5,150,105,0.35)]"
-          : "bg-gradient-to-br from-[#1E3A8A] to-[#2563EB]",
+          ? "min-h-11 bg-gradient-to-br from-[#065F46] to-[#059669] py-2.5 shadow-[0_1px_3px_rgba(5,150,105,0.35)]"
+          : "min-h-9 bg-gradient-to-br from-[#1E3A8A] to-[#2563EB] py-2",
         visible && !exiting
           ? "scale-100 opacity-100"
           : "pointer-events-none scale-0 opacity-0",
@@ -68,8 +68,9 @@ function KeywordPill({
     >
       <span
         className={cn(
-          "truncate leading-none",
-          isUrdu ? "font-urdu text-[0.875rem] leading-snug" : "font-sans"
+          isUrdu
+            ? "font-urdu max-w-[12rem] overflow-visible text-[0.95rem] leading-[2.1]"
+            : "truncate font-sans leading-normal"
         )}
       >
         {keyword}

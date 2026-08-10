@@ -129,8 +129,10 @@ PROCESSING_CONFIG = {
     'min_region_height_px': 22,
     'min_region_width_px': 80,
     'duplicate_text_threshold': 0.8,  # Similarity threshold to avoid duplicates
-    # Save the exact region crops fed into UTRNet (after enhance) for debugging
+    # Save OCR region crops for debugging (raw and/or enhanced, depending on enhance flag)
     'save_ocr_crops': True,
+    # If False, pass the raw crop to UTRNet (skip CLAHE/Otsu enhance — often better for TV tickers)
+    'ocr_enhance_crop': False,
 }
 
 # Auto-start RTSP monitoring when Flask boots.
@@ -306,7 +308,7 @@ LOGGING_CONFIG = {
 STORAGE_CONFIG = {
     'screenshots_dir': BASE_DIR / 'data' / 'screenshots',
     'audio_clips_dir': BASE_DIR / 'data' / 'audio',
-    # Exact crops sent to UTRNet (post-enhance) — separate from full-frame screenshots
+    # OCR region crops for debugging (raw always; enhanced only if ocr_enhance_crop)
     'ocr_crops_dir': BASE_DIR / 'data' / 'ocr_crops',
     'max_storage_days': 30,  # Keep data for 30 days
     'cleanup_interval': 86400  # Clean up daily

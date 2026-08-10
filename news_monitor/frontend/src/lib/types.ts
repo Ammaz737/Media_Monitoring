@@ -32,6 +32,7 @@ export interface Alert {
   alert_text: string;
   severity: "high" | "medium" | "low" | string;
   is_read: boolean;
+  channel_name?: string;
 }
 
 export interface DatabaseStats {

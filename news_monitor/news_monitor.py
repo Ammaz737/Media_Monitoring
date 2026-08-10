@@ -22,6 +22,7 @@ from config import (
 )
 from utrnet_wrapper import (
     UTRNetPredictor,
+    SharedOcrService,
     clean_urdu_text,
     calculate_text_similarity,
     is_plausible_urdu_text,
@@ -42,16 +43,23 @@ class NewsMonitor:
     Processes RTSP streams for real-time text and audio extraction
     """
     
-    def __init__(self, rtsp_url: str = None, channel_name: str = "news_channel",
-                 speech_enabled: bool = True, text_regions: Dict = None):
+    def __init__(
+        self,
+        rtsp_url: str = None,
+        channel_name: str = "news_channel",
+        speech_enabled: bool = True,
+        text_regions: Dict = None,
+        shared_ocr: Optional[SharedOcrService] = None,
+    ):
         self.source_url = (rtsp_url or RTSP_URL).strip()
         self.rtsp_url = self.source_url
         self.channel_name = channel_name
         self.speech_enabled = speech_enabled
         self.stream_error: Optional[str] = None
         self.custom_text_regions = text_regions if isinstance(text_regions, dict) else None
-        
-        # Each channel loads its own OCR + optional speech models
+        self.shared_ocr = shared_ocr
+        self._owns_utr_predictor = shared_ocr is None
+
         self.utr_predictor = None
         self.speech_transcriber = None
         self.database = NewsDatabase()
@@ -100,11 +108,22 @@ class NewsMonitor:
             load_speech = self.speech_enabled
         try:
             if self.utr_predictor is None:
-                self.utr_predictor = UTRNetPredictor(
-                    device='cuda',
-                    batch_size=PROCESSING_CONFIG['batch_size']
-                )
-                logging.info("UTRNet model initialized for %s", self.channel_name)
+                if self.shared_ocr is not None:
+                    self.utr_predictor = self.shared_ocr.ensure_loaded()
+                    logging.info("Attached shared UTRNet for %s", self.channel_name)
+                else:
+                    logging.info(
+                        "Loading standalone UTRNet for %s (single-channel mode, not shared)",
+                        self.channel_name,
+                    )
+                    self.utr_predictor = UTRNetPredictor(
+                        device="cuda",
+                        batch_size=PROCESSING_CONFIG["batch_size"],
+                    )
+                    logging.info(
+                        "Standalone UTRNet loaded for %s",
+                        self.channel_name,
+                    )
 
             if load_speech:
                 self._init_speech()
@@ -230,10 +249,10 @@ class NewsMonitor:
             if thread and thread.is_alive():
                 thread.join(timeout=5.0)
         
-        # Clean up models
-        if self.utr_predictor:
+        # Clean up models (shared OCR is owned by MultiChannelNewsMonitor)
+        if self._owns_utr_predictor and self.utr_predictor:
             self.utr_predictor.cleanup()
-            self.utr_predictor = None
+        self.utr_predictor = None
         
         if self.speech_transcriber:
             self.speech_transcriber.cleanup()
@@ -309,7 +328,7 @@ class NewsMonitor:
                 self.frame_queue.get_nowait()
             except queue.Empty:
                 break
-        
+
         while not self.audio_queue.empty():
             try:
                 self.audio_queue.get_nowait()
@@ -496,7 +515,7 @@ class NewsMonitor:
                     time.sleep(0.5)
                     continue
 
-                # Process video frames
+                # Process frames for region OCR
                 self._process_video_frames()
                 
                 # Process audio transcriptions
@@ -511,6 +530,61 @@ class NewsMonitor:
                 time.sleep(1.0)
         
         logging.info("Processing loop ended")
+
+    def _apply_region_extraction(
+        self,
+        region_name: str,
+        result: Dict,
+        timestamp: datetime,
+        frame_hash: str,
+        screenshot_image: Optional[np.ndarray] = None,
+        source_label: str = "frame",
+    ) -> None:
+        """Store OCR result, alerts, and cache updates for one region."""
+        if not result.get("text") or result["confidence"] < PROCESSING_CONFIG["ocr_confidence_threshold"]:
+            return
+
+        cleaned_text = clean_urdu_text(result["text"])
+        youtube = is_youtube_url(self.source_url)
+        min_len = 10 if youtube else PROCESSING_CONFIG.get("min_urdu_text_length", 6)
+        min_long = 2 if youtube else 1
+        if not is_plausible_urdu_text(cleaned_text, min_length=min_len, min_long_words=min_long):
+            logging.info(
+                "Skipped low-quality OCR (%s/%s): %s",
+                source_label,
+                region_name,
+                cleaned_text[:60],
+            )
+            return
+
+        if not cleaned_text or self._is_duplicate_text(cleaned_text, region_name):
+            return
+
+        screenshot_path = None
+        if result.get("priority") == "high" and screenshot_image is not None:
+            screenshot_path = self._save_region_image(screenshot_image, timestamp, region_name)
+
+        extraction_uuid = self.database.insert_text_extraction(
+            region_name=region_name,
+            text=cleaned_text,
+            confidence=result["confidence"],
+            priority=result["priority"],
+            region_coords=result["region"],
+            frame_hash=frame_hash,
+            screenshot_path=str(screenshot_path) if screenshot_path else None,
+            channel_name=self.channel_name,
+        )
+
+        if extraction_uuid:
+            self.stats["text_extractions"] += 1
+            self._check_text_alerts(extraction_uuid, cleaned_text)
+            self.text_cache[f"{region_name}:{cleaned_text[:50]}"] = time.time()
+            logging.info(
+                "Extracted text from %s (%s): %s…",
+                region_name,
+                source_label,
+                cleaned_text[:100],
+            )
     
     def _process_video_frames(self):
         """Process queued video frames for text extraction"""
@@ -533,72 +607,44 @@ class NewsMonitor:
             self.stats['frames_processed'] += 1
     
     def _process_single_frame(self, frame_data: Dict):
-        """Process a single frame for text extraction"""
+        """Process a single frame for region text extraction."""
         frame = frame_data['frame']
         timestamp = frame_data['timestamp']
         
         try:
-            # Calculate frame hash to avoid duplicate processing
             frame_hash = self._calculate_frame_hash(frame)
             
             if frame_hash == self.last_frame_hash:
-                return  # Skip identical frames
+                return
             
             self.last_frame_hash = frame_hash
-            
-            # Extract text from different regions
+
+            regions = self._get_text_regions()
+            if not regions:
+                return
+
             extraction_results = self.utr_predictor.extract_text_regions(
                 frame,
-                self._get_text_regions(),
+                regions,
                 channel_name=self.channel_name,
             )
             
-            # Process each region's results
             for region_name, result in extraction_results.items():
-                if result['text'] and result['confidence'] >= PROCESSING_CONFIG['ocr_confidence_threshold']:
-                    # Clean extracted text
-                    cleaned_text = clean_urdu_text(result['text'])
-                    youtube = is_youtube_url(self.source_url)
-                    min_len = 10 if youtube else PROCESSING_CONFIG.get('min_urdu_text_length', 6)
-                    min_long = 2 if youtube else 1
-                    if not is_plausible_urdu_text(
-                        cleaned_text, min_length=min_len, min_long_words=min_long
-                    ):
-                        logging.debug(
-                            "Skipped low-quality OCR (%s): %s",
-                            region_name,
-                            cleaned_text[:40],
-                        )
-                        continue
-
-                    if cleaned_text and not self._is_duplicate_text(cleaned_text, region_name):
-                        # Save screenshot if configured
-                        screenshot_path = None
-                        if result['priority'] == 'high':
-                            screenshot_path = self._save_screenshot(frame, timestamp, region_name)
-                        
-                        # Store in database
-                        extraction_uuid = self.database.insert_text_extraction(
-                            region_name=region_name,
-                            text=cleaned_text,
-                            confidence=result['confidence'],
-                            priority=result['priority'],
-                            region_coords=result['region'],
-                            frame_hash=frame_hash,
-                            screenshot_path=str(screenshot_path) if screenshot_path else None,
-                            channel_name=self.channel_name
-                        )
-                        
-                        if extraction_uuid:
-                            self.stats['text_extractions'] += 1
-                            
-                            # Check for alerts
-                            self._check_text_alerts(extraction_uuid, cleaned_text)
-                            
-                            # Update text cache
-                            self.text_cache[f"{region_name}:{cleaned_text[:50]}"] = time.time()
-                            
-                            logging.info(f"Extracted text from {region_name}: {cleaned_text[:100]}...")
+                screenshot_image = frame
+                coords = result.get("region")
+                if coords and len(coords) == 4:
+                    x1, y1, x2, y2 = [int(v) for v in coords]
+                    crop = frame[y1:y2, x1:x2]
+                    if crop.size > 0:
+                        screenshot_image = crop
+                self._apply_region_extraction(
+                    region_name=region_name,
+                    result=result,
+                    timestamp=timestamp,
+                    frame_hash=frame_hash,
+                    screenshot_image=screenshot_image,
+                    source_label="frame",
+                )
             
         except Exception as e:
             logging.error(f"Error processing frame: {e}")
@@ -684,20 +730,22 @@ class NewsMonitor:
         
         return False
     
-    def _save_screenshot(self, frame: np.ndarray, timestamp: datetime, region_name: str) -> Optional[Path]:
-        """Save screenshot of frame"""
+    def _save_region_image(
+        self, image: np.ndarray, timestamp: datetime, region_name: str
+    ) -> Optional[Path]:
+        """Save a region crop image."""
         try:
             filename = f"{timestamp.strftime('%Y%m%d_%H%M%S')}_{region_name}_{self.channel_name}.jpg"
             filepath = STORAGE_CONFIG['screenshots_dir'] / filename
-            
-            # Save image
-            cv2.imwrite(str(filepath), frame)
-            
+            cv2.imwrite(str(filepath), image)
             return filepath
-            
         except Exception as e:
-            logging.error(f"Error saving screenshot: {e}")
+            logging.error(f"Error saving region image: {e}")
             return None
+
+    def _save_screenshot(self, frame: np.ndarray, timestamp: datetime, region_name: str) -> Optional[Path]:
+        """Save screenshot of frame"""
+        return self._save_region_image(frame, timestamp, region_name)
     
     def _check_text_alerts(self, content_id: str, text: str):
         """Check text for alert keywords"""
@@ -711,7 +759,8 @@ class NewsMonitor:
                     content_id=content_id,
                     matched_keywords=matched_keywords,
                     alert_text=text[:500],
-                    severity='high' if any(kw in ['عاجل', 'breaking'] for kw in matched_keywords) else 'medium'
+                    severity='high' if any(kw in ['عاجل', 'breaking'] for kw in matched_keywords) else 'medium',
+                    channel_name=self.channel_name,
                 )
                 
                 if alert_uuid:
@@ -730,7 +779,8 @@ class NewsMonitor:
                     content_id=content_id,
                     matched_keywords=matched_keywords,
                     alert_text=text[:500],
-                    severity='high' if any(kw in ['عاجل', 'breaking'] for kw in matched_keywords) else 'medium'
+                    severity='high' if any(kw in ['عاجل', 'breaking'] for kw in matched_keywords) else 'medium',
+                    channel_name=self.channel_name,
                 )
                 
                 if alert_uuid:
@@ -807,39 +857,47 @@ class MultiChannelNewsMonitor:
         self.monitors = {}
         self.is_running = False
         self.alert_system = AlertSystem(self.database)
+        self.shared_ocr = SharedOcrService()
         # Channel id that owns the shared Whisper / audio-capture thread
         self._speech_channel_id: Optional[str] = None
 
         # Initialize monitors for enabled channels
         self._initialize_monitors()
 
-        logging.info(f"Multi-channel monitor initialized with {len(self.monitors)} channels")
+        logging.info(
+            "Multi-channel monitor initialized with %s channels (shared OCR)",
+            len(self.monitors),
+        )
+
+    def _make_monitor(self, config: Dict) -> NewsMonitor:
+        """Create a channel monitor that uses the shared UTRNet instance."""
+        return NewsMonitor(
+            rtsp_url=config["rtsp_url"],
+            channel_name=config["name"],
+            speech_enabled=False,
+            text_regions=config.get("text_regions"),
+            shared_ocr=self.shared_ocr,
+        )
 
     def _initialize_monitors(self):
         """Initialize individual monitors for each enabled channel"""
         for channel_id, config in self.channel_configs.items():
-            if config.get('enabled', False):
+            if config.get("enabled", False):
                 try:
-                    # OCR per channel; speech started once after all OCR is ready
-                    monitor = NewsMonitor(
-                        rtsp_url=config['rtsp_url'],
-                        channel_name=config['name'],
-                        speech_enabled=False,
-                        text_regions=config.get('text_regions'),
-                    )
-                    self.monitors[channel_id] = monitor
-                    logging.info("Initialized monitor for channel: %s", config['name'])
+                    self.monitors[channel_id] = self._make_monitor(config)
+                    logging.info("Initialized monitor for channel: %s", config["name"])
                 except Exception as e:
                     logging.error(f"Failed to initialize monitor for {config['name']}: {e}")
 
     def any_channel_running(self) -> bool:
         return any(m.is_running for m in self.monitors.values())
 
-    def _wait_for_ocr_ready(self, monitor: "NewsMonitor", timeout: float = 180.0) -> bool:
-        """Block until this channel's UTRNet is loaded (or failed / stopped)."""
+    def _wait_for_processing_ready(self, monitor: "NewsMonitor", timeout: float = 120.0) -> bool:
+        """Block until shared OCR is attached and the channel processing thread is running."""
         deadline = time.time() + timeout
         while self.is_running and time.time() < deadline:
-            if monitor.utr_predictor is not None:
+            proc = monitor.processing_thread
+            if monitor.utr_predictor is not None and proc is not None and proc.is_alive():
                 return True
             err = (monitor.stream_error or "").lower()
             if err and not err.startswith("loading ocr") and not err.startswith("starting"):
@@ -848,10 +906,14 @@ class MultiChannelNewsMonitor:
             if not monitor.is_running and monitor.utr_predictor is None:
                 return False
             time.sleep(0.5)
-        return monitor.utr_predictor is not None
+        return (
+            monitor.utr_predictor is not None
+            and monitor.processing_thread is not None
+            and monitor.processing_thread.is_alive()
+        )
 
     def start_monitoring(self):
-        """Start monitoring all enabled channels — each loads its own OCR."""
+        """Start monitoring all enabled channels using one shared UTRNet."""
         if self.is_running or self.any_channel_running():
             logging.warning("Multi-channel monitoring is already running")
             return
@@ -862,42 +924,47 @@ class MultiChannelNewsMonitor:
             started = 0
             first_ready: Optional["NewsMonitor"] = None
             try:
+                logging.info("Loading shared UTRNet for all channels…")
+                self.shared_ocr.ensure_loaded()
+            except Exception as e:
+                logging.error("Shared OCR failed to load: %s", e)
+                self.is_running = False
+                return
+
+            try:
                 for channel_id, monitor in list(self.monitors.items()):
                     if not self.is_running:
                         break
                     try:
-                        logging.info(
-                            "Starting channel %s (loading its own OCR)…",
-                            monitor.channel_name,
-                        )
+                        logging.info("Starting channel %s…", monitor.channel_name)
                         monitor.start_monitoring()
-                        ready = self._wait_for_ocr_ready(monitor)
+                        ready = self._wait_for_processing_ready(monitor)
                         if ready:
                             started += 1
                             if first_ready is None:
                                 first_ready = monitor
                             logging.info(
-                                "OCR ready for %s — starting next channel",
+                                "Processing ready for %s — starting next channel",
                                 monitor.channel_name,
                             )
                         else:
                             logging.error(
-                                "OCR not ready for %s (%s) — continuing with others",
+                                "Processing not ready for %s (%s) — continuing with others",
                                 monitor.channel_name,
                                 monitor.stream_error,
                             )
-                        time.sleep(0.5)
+                        time.sleep(0.25)
                     except Exception as e:
                         logging.error(f"Failed to start monitor for {channel_id}: {e}")
 
                 logging.info(
-                    "Multi-channel OCR active: %s/%s channels",
+                    "Multi-channel monitoring active: %s/%s channels (shared OCR)",
                     started,
                     len(self.monitors),
                 )
 
-                # Audio AFTER all OCR models are loaded (prevents GPU OOM crash)
-                if self.is_running and SPEECH_CONFIG.get('enabled', True):
+                # Audio AFTER shared OCR is loaded (prevents GPU OOM crash)
+                if self.is_running and SPEECH_CONFIG.get("enabled", True):
                     self._ensure_speech(preferred=first_ready)
 
             except Exception as e:
@@ -919,6 +986,8 @@ class MultiChannelNewsMonitor:
                 logging.info(f"Stopped monitoring for channel: {monitor.channel_name}")
             except Exception as e:
                 logging.error(f"Error stopping monitor for {channel_id}: {e}")
+
+        self.shared_ocr.cleanup()
 
         logging.info("Multi-channel monitoring stopped")
 
@@ -1086,12 +1155,7 @@ class MultiChannelNewsMonitor:
         if enabled:
             if channel_id not in self.monitors:
                 cfg = self.channel_configs[channel_id]
-                self.monitors[channel_id] = NewsMonitor(
-                    rtsp_url=cfg['rtsp_url'],
-                    channel_name=cfg['name'],
-                    speech_enabled=False,
-                    text_regions=cfg.get('text_regions'),
-                )
+                self.monitors[channel_id] = self._make_monitor(cfg)
             if self.is_running and not self.monitors[channel_id].is_running:
                 self.monitors[channel_id].start_monitoring()
             if self.is_running and not self._speech_host_alive():
@@ -1121,12 +1185,7 @@ class MultiChannelNewsMonitor:
                 logging.info(f"Registered disabled channel: {config.get('name', channel_id)}")
                 return True
 
-            monitor = NewsMonitor(
-                rtsp_url=config['rtsp_url'],
-                channel_name=config['name'],
-                speech_enabled=False,
-                text_regions=config.get('text_regions'),
-            )
+            monitor = self._make_monitor(config)
 
             self.monitors[channel_id] = monitor
             logging.info(f"Added new channel: {config['name']}")

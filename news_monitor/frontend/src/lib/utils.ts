@@ -35,3 +35,14 @@ export function parseKeywords(raw: string | string[] | null | undefined): string
     return [raw];
   }
 }
+
+/** Build same-origin URL for a stored screenshot absolute/relative path. */
+export function screenshotUrl(
+  path: string | null | undefined
+): string | null {
+  if (!path) return null;
+  const normalized = path.replace(/\\/g, "/");
+  const filename = normalized.split("/").pop();
+  if (!filename) return null;
+  return `/api/screenshots/${encodeURIComponent(filename)}`;
+}

@@ -6,10 +6,10 @@ import {
   Bell,
   Check,
   Clock,
-  Copy,
   FileText,
   Mic,
   Shield,
+  Tv,
 } from "lucide-react";
 import { Dialog, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -92,10 +92,6 @@ export function AlertViewModal({
     item.content_type?.toLowerCase().includes("audio") ||
     item.content_type?.toLowerCase().includes("transcription");
   const urdu = hasArabicScript(item.alert_text);
-
-  const copyId = () => {
-    void navigator.clipboard?.writeText(item.uuid);
-  };
 
   return (
     <Dialog
@@ -202,7 +198,12 @@ export function AlertViewModal({
             </div>
           </section>
 
-          <div className="grid grid-cols-3 gap-2" dir="ltr">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4" dir="ltr">
+            <MetaTile
+              label="Channel"
+              value={item.channel_name || "unknown"}
+              icon={<Tv className="h-3 w-3" />}
+            />
             <MetaTile
               label="Severity"
               value={item.severity || "medium"}
@@ -245,19 +246,6 @@ export function AlertViewModal({
               {confidence.toFixed(0)}%
             </p>
           </div>
-
-          <button
-            type="button"
-            onClick={copyId}
-            className="group flex w-full items-center gap-2 rounded-md border border-dashed border-[#E2E8F0] px-2.5 py-1.5 text-start hover:bg-[#F8FAFC]"
-            dir="ltr"
-            title={item.uuid}
-          >
-            <Copy className="h-3 w-3 shrink-0 text-[#94A3B8]" />
-            <span className="min-w-0 flex-1 truncate font-mono text-[0.62rem] text-[#94A3B8]">
-              {item.uuid}
-            </span>
-          </button>
         </div>
       </div>
 

@@ -305,12 +305,14 @@ class UTRNetPredictor:
                     }
                     continue
 
-                # Raw frame crop (pre-enhance) + post-enhance model input
+                # Raw frame crop; optionally enhance before UTRNet
                 _save_ocr_crop(region_img, region_name, channel_name, suffix="raw")
-                region_img = enhance_region_for_ocr(region_img)
-                _save_ocr_crop(region_img, region_name, channel_name, suffix="enhanced")
+                ocr_input = region_img
+                if PROCESSING_CONFIG.get("ocr_enhance_crop", False):
+                    ocr_input = enhance_region_for_ocr(region_img)
+                    _save_ocr_crop(ocr_input, region_name, channel_name, suffix="enhanced")
                 with self._infer_lock:
-                    text, confidence = self.predict_single(region_img)
+                    text, confidence = self.predict_single(ocr_input)
 
                 min_conf = region_config.get('min_confidence', 0.5)
                 if confidence >= min_conf and text.strip():
@@ -338,13 +340,56 @@ class UTRNetPredictor:
                 }
         
         return results
-    
+
     def cleanup(self):
         """Cleanup resources"""
         if self.model:
             del self.model
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
         logging.info("UTRNet resources cleaned up")
+
+
+class SharedOcrService:
+    """One UTRNet instance shared across all channel monitors."""
+
+    def __init__(self):
+        self._predictor: Optional[UTRNetPredictor] = None
+        self._lock = threading.Lock()
+        self._load_error: Optional[str] = None
+
+    def ensure_loaded(self) -> UTRNetPredictor:
+        """Load UTRNet once; safe to call from multiple threads."""
+        if self._predictor is not None:
+            return self._predictor
+        with self._lock:
+            if self._predictor is not None:
+                return self._predictor
+            try:
+                self._load_error = None
+                self._predictor = UTRNetPredictor(
+                    device="cuda",
+                    batch_size=PROCESSING_CONFIG["batch_size"],
+                )
+                logging.info("Shared UTRNet model initialized for multi-channel OCR")
+                return self._predictor
+            except Exception as e:
+                self._load_error = str(e)
+                logging.error("Failed to initialize shared UTRNet: %s", e)
+                raise
+
+    def is_ready(self) -> bool:
+        return self._predictor is not None
+
+    def get_load_error(self) -> Optional[str]:
+        return self._load_error
+
+    def cleanup(self):
+        with self._lock:
+            if self._predictor is not None:
+                self._predictor.cleanup()
+                self._predictor = None
+            self._load_error = None
+            logging.info("Shared UTRNet resources cleaned up")
 
 
 def _safe_filename_part(value: str, fallback: str = "unknown") -> str:
