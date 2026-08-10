@@ -208,6 +208,27 @@ export function SettingsPanel() {
                   }
                 }
           }
+          onUpdateUrl={
+            usingFallback
+              ? undefined
+              : async (id, rtspUrl) => {
+                  setChannelBusy(true);
+                  setChannelStatus(null);
+                  try {
+                    const res = await api.updateChannelUrl(id, rtspUrl);
+                    applyChannels(res.channels);
+                    setChannelStatus(`Updated URL for ${res.channel.name}`);
+                    return true;
+                  } catch (e) {
+                    setChannelStatus(
+                      e instanceof Error ? e.message : "Failed to update URL"
+                    );
+                    return false;
+                  } finally {
+                    setChannelBusy(false);
+                  }
+                }
+          }
         />
 
         <AlertKeywordsCard

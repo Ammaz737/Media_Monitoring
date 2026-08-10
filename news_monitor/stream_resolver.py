@@ -5,14 +5,20 @@ Resolve dashboard stream URLs (RTSP, HTTP, YouTube) to something OpenCV/ffmpeg c
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import ssl
 import subprocess
 from pathlib import Path
 from typing import Optional, Tuple
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import cv2
 import numpy as np
+
+# Default when URL has no quality/height/vq hint
+_DEFAULT_YT_HEIGHT = 720
+_QUALITY_QUERY_KEYS = ("quality", "height", "vq", "res")
 
 # Python 3.12 removed ssl.wrap_socket; older eventlet/curl_cffi still expect it.
 if not hasattr(ssl, "wrap_socket"):
@@ -42,6 +48,79 @@ if not hasattr(ssl, "wrap_socket"):
 def is_youtube_url(url: str) -> bool:
     u = url.lower()
     return "youtube.com" in u or "youtu.be" in u or "youtube-nocookie.com" in u
+
+
+def parse_youtube_preferred_height(url: str) -> Tuple[str, int]:
+    """
+    Read optional stream height from the watch URL query, then strip those keys.
+
+    Supported examples (app-only; YouTube ignores them):
+      .../watch?v=ID&quality=720
+      .../watch?v=ID&quality=720p
+      .../watch?v=ID&height=1080
+      .../watch?v=ID&vq=hd720
+      .../watch?v=ID&res=480
+    """
+    url = (url or "").strip()
+    if not url or not is_youtube_url(url):
+        return url, _DEFAULT_YT_HEIGHT
+
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    raw = None
+    for key in _QUALITY_QUERY_KEYS:
+        if key in qs and qs[key]:
+            raw = (qs[key][0] or "").strip()
+            break
+
+    height = _DEFAULT_YT_HEIGHT
+    if raw:
+        parsed_h = _parse_height_token(raw)
+        if parsed_h:
+            height = parsed_h
+
+    for key in _QUALITY_QUERY_KEYS:
+        qs.pop(key, None)
+
+    clean_query = urlencode(
+        [(k, v) for k, values in qs.items() for v in values],
+        doseq=False,
+    )
+    clean_url = urlunparse(parsed._replace(query=clean_query))
+    return clean_url, height
+
+
+def _parse_height_token(token: str) -> Optional[int]:
+    """Map '720', '720p', 'hd720', 'fullhd', '4k' → pixel height."""
+    t = (token or "").strip().lower().replace(" ", "")
+    aliases = {
+        "144": 144,
+        "240": 240,
+        "360": 360,
+        "480": 480,
+        "720": 720,
+        "1080": 1080,
+        "1440": 1440,
+        "2160": 2160,
+        "4k": 2160,
+        "uhd": 2160,
+        "fullhd": 1080,
+        "fhd": 1080,
+        "hd": 720,
+        "sd": 480,
+        "hd720": 720,
+        "hd1080": 1080,
+        "highres": 1080,
+    }
+    if t in aliases:
+        return aliases[t]
+    m = re.search(r"(\d{3,4})", t)
+    if not m:
+        return None
+    h = int(m.group(1))
+    if 144 <= h <= 2160:
+        return h
+    return None
 
 
 def resolve_stream_url(url: str) -> Tuple[str, str | None]:
@@ -124,6 +203,8 @@ def _resolve_youtube(url: str) -> Tuple[str, str | None]:
             "YouTube links require yt-dlp. Run: pip install yt-dlp — then restart Flask.",
         )
 
+    clean_url, preferred_height = parse_youtube_preferred_height(url)
+
     # Some live channels only expose formats via android/ios clients.
     # Try several client stacks; first success wins.
     client_stacks = (
@@ -154,7 +235,7 @@ def _resolve_youtube(url: str) -> Tuple[str, str | None]:
                 **auth_opts,
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
+                info = ydl.extract_info(clean_url, download=False)
             if not info:
                 continue
 
@@ -162,14 +243,17 @@ def _resolve_youtube(url: str) -> Tuple[str, str | None]:
             is_live = bool(info.get("is_live")) or live_status == "is_live"
 
             # Prefer HLS for live (stable with ffmpeg); fall back to any playable URL
-            playable = _pick_youtube_playable_url(info, prefer_hls=is_live)
+            playable = _pick_youtube_playable_url(
+                info, prefer_hls=is_live, preferred_height=preferred_height
+            )
             if playable:
                 kind = "HLS" if "m3u8" in playable else "direct"
                 logging.info(
-                    "Resolved YouTube (%s, clients=%s, live=%s)",
+                    "Resolved YouTube (%s, clients=%s, live=%s, height~%sp)",
                     kind,
                     "+".join(clients),
                     is_live,
+                    preferred_height,
                 )
                 return playable, None
 
@@ -195,9 +279,14 @@ def _resolve_youtube(url: str) -> Tuple[str, str | None]:
     return url, "Could not extract a playable URL from this YouTube link."
 
 
-def _pick_youtube_playable_url(info: dict, prefer_hls: bool = True) -> str | None:
+def _pick_youtube_playable_url(
+    info: dict,
+    prefer_hls: bool = True,
+    preferred_height: int = _DEFAULT_YT_HEIGHT,
+) -> str | None:
     """Choose the best ffmpeg-friendly URL from yt-dlp info."""
     formats = list(info.get("formats") or [])
+    target_h = int(preferred_height or _DEFAULT_YT_HEIGHT)
 
     def is_hls(fmt: dict) -> bool:
         proto = (fmt.get("protocol") or "").lower()
@@ -207,11 +296,12 @@ def _pick_youtube_playable_url(info: dict, prefer_hls: bool = True) -> str | Non
     def has_video(fmt: dict) -> bool:
         return fmt.get("vcodec") not in (None, "none")
 
-    # Top-level manifest / url first when HLS
-    for key in ("manifest_url", "url"):
-        candidate = info.get(key)
-        if candidate and (not prefer_hls or "m3u8" in candidate):
-            if "m3u8" in candidate or not prefer_hls:
+    # Top-level HLS master manifests encode multiple renditions; skip when the
+    # caller asked for a specific height so we can pick a concrete stream.
+    if prefer_hls and target_h == _DEFAULT_YT_HEIGHT:
+        for key in ("manifest_url", "url"):
+            candidate = info.get(key)
+            if candidate and "m3u8" in candidate:
                 return candidate
 
     ranked = []
@@ -220,8 +310,8 @@ def _pick_youtube_playable_url(info: dict, prefer_hls: bool = True) -> str | Non
         if not u or not has_video(fmt):
             continue
         height = fmt.get("height") or 0
-        # Prefer ~720p, then lower, then higher
-        height_score = -abs(height - 720) if height else -9999
+        # Prefer formats closest to the URL quality hint (default 720p)
+        height_score = -abs(height - target_h) if height else -9999
         hls_score = 100 if is_hls(fmt) else 0
         if prefer_hls and not is_hls(fmt):
             hls_score -= 50

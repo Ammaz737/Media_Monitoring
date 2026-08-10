@@ -83,7 +83,7 @@ export function getFallbackAppConfig(): AppConfig {
       },
     },
     processing: {
-      frame_interval: 2.0,
+      frame_interval: 1.0,
       batch_size: 4,
       max_queue_size: 100,
     },

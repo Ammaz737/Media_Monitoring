@@ -252,6 +252,18 @@ export const api = {
       body: JSON.stringify({ enabled }),
     }),
 
+  updateChannelUrl: (channelId: string, rtsp_url: string) =>
+    request<{
+      success: boolean;
+      channel_id: string;
+      channel: AppConfig["rtsp_channels"][string];
+      channels: AppConfig["rtsp_channels"];
+      error?: string;
+    }>(`/api/config/channels/${encodeURIComponent(channelId)}`, {
+      method: "POST",
+      body: JSON.stringify({ rtsp_url }),
+    }),
+
   updateChannelRegions: (
     channelId: string,
     text_regions: AppConfig["rtsp_channels"][string]["text_regions"] | null

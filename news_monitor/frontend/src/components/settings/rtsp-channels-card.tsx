@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Plus, Radio, Trash2, Video, Scan } from "lucide-react";
+import { Link2, Pencil, Plus, Radio, Trash2, Video, Scan } from "lucide-react";
 import { SectionCard } from "@/components/ui/section-card";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
@@ -29,6 +29,7 @@ interface RtspChannelsCardProps {
   onToggle: (id: string, enabled: boolean) => void;
   onAdd?: (channel: NewRtspChannelInput) => Promise<boolean | void>;
   onDelete?: (id: string) => Promise<void>;
+  onUpdateUrl?: (id: string, rtspUrl: string) => Promise<boolean | void>;
   onChannelsUpdated?: (channels: Record<string, RtspChannel>) => void;
   busy?: boolean;
   statusMessage?: string | null;
@@ -44,6 +45,7 @@ export function RtspChannelsCard({
   onToggle,
   onAdd,
   onDelete,
+  onUpdateUrl,
   onChannelsUpdated,
   busy = false,
   statusMessage,
@@ -58,6 +60,13 @@ export function RtspChannelsCard({
     name: string;
   } | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [urlEdit, setUrlEdit] = useState<{
+    id: string;
+    name: string;
+    url: string;
+  } | null>(null);
+  const [editUrlValue, setEditUrlValue] = useState("");
+  const [savingUrl, setSavingUrl] = useState(false);
   const [regionEdit, setRegionEdit] = useState<{
     id: string;
     name: string;
@@ -98,6 +107,27 @@ export function RtspChannelsCard({
       setPendingDelete(null);
     } finally {
       setDeleting(false);
+    }
+  };
+
+  const openUrlEdit = (id: string, channelName: string, url: string) => {
+    setUrlEdit({ id, name: channelName, url });
+    setEditUrlValue(url);
+  };
+
+  const saveUrlEdit = async () => {
+    if (!urlEdit || !onUpdateUrl || savingUrl) return;
+    const trimmed = editUrlValue.trim();
+    if (!trimmed || trimmed === urlEdit.url) {
+      setUrlEdit(null);
+      return;
+    }
+    setSavingUrl(true);
+    try {
+      const ok = await onUpdateUrl(urlEdit.id, trimmed);
+      if (ok !== false) setUrlEdit(null);
+    } finally {
+      setSavingUrl(false);
     }
   };
 
@@ -249,6 +279,19 @@ export function RtspChannelsCard({
                       {ch.rtsp_url}
                     </p>
                     <div className="mt-1 flex flex-wrap gap-2">
+                      {onUpdateUrl && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-8 text-xs"
+                          disabled={busy}
+                          onClick={() => openUrlEdit(id, ch.name, ch.rtsp_url)}
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                          Edit URL
+                        </Button>
+                      )}
                       <Button
                         type="button"
                         size="sm"
@@ -320,6 +363,77 @@ export function RtspChannelsCard({
           })}
         </div>
       </div>
+
+      <Dialog
+        open={urlEdit !== null}
+        onOpenChange={(open) => {
+          if (!open && !savingUrl) setUrlEdit(null);
+        }}
+        className="max-w-lg p-6"
+      >
+        <div className="pe-8">
+          <h3 className="flex items-center gap-2 text-lg font-semibold text-slate-900">
+            <Link2 className="h-5 w-5 text-primary" />
+            Edit stream URL
+          </h3>
+          <p className="mt-2 text-sm leading-relaxed text-slate-600">
+            Update the RTSP or YouTube URL for{" "}
+            <span className="font-semibold text-slate-900">
+              {urlEdit?.name}
+            </span>
+            . YouTube quality tip: append{" "}
+            <code className="rounded bg-slate-100 px-1 text-xs">
+              &amp;quality=720
+            </code>{" "}
+            or{" "}
+            <code className="rounded bg-slate-100 px-1 text-xs">
+              &amp;quality=1080
+            </code>
+            .
+          </p>
+          <div className="mt-4 space-y-1.5">
+            <label
+              className="text-xs font-medium text-slate-600"
+              htmlFor="edit-ch-url"
+            >
+              Stream URL
+            </label>
+            <Input
+              id="edit-ch-url"
+              value={editUrlValue}
+              onChange={(e) => setEditUrlValue(e.target.value)}
+              placeholder="https://www.youtube.com/watch?v=…&quality=720"
+              className="font-mono text-xs"
+              disabled={savingUrl}
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void saveUrlEdit();
+                }
+              }}
+            />
+          </div>
+        </div>
+        <DialogFooter className="gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => setUrlEdit(null)}
+            disabled={savingUrl}
+          >
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            onClick={saveUrlEdit}
+            disabled={savingUrl || !editUrlValue.trim()}
+          >
+            <Pencil className="h-4 w-4" />
+            {savingUrl ? "Saving…" : "Save URL"}
+          </Button>
+        </DialogFooter>
+      </Dialog>
 
       <Dialog
         open={pendingDelete !== null}

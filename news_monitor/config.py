@@ -19,28 +19,35 @@ URDU_GLYPHS_PATH = UTRNET_DIR / "UrduGlyphs.txt"
 # Seed RTSP channels — written to SQLite on first boot, then DB is source of truth.
 # Camera 192.168.2.173 — stream IDs 101, 201, ..., 801
 DEFAULT_RTSP_CHANNELS = {
+    'channel_0': {
+        'name': 'News Channel 0',
+        # Optional quality hint (app-only): &quality=720|1080|480 or &height=720
+        'rtsp_url': 'https://www.youtube.com/watch?v=t3fvgmDDmdc&quality=720',
+        'enabled': True,
+        'priority': 'high'
+    },
     'channel_1': {
         'name': 'News Channel 1',
         'rtsp_url': 'rtsp://admin:Admin123.@192.168.2.173:554/Streaming/Channels/101',
-        'enabled': True,
+        'enabled': False,
         'priority': 'high'
     },
     'channel_2': {
         'name': 'News Channel 2',
         'rtsp_url': 'rtsp://admin:Admin123.@192.168.2.173:554/Streaming/Channels/201',
-        'enabled': True,
+        'enabled': False,
         'priority': 'medium'
     },
     'channel_3': {
         'name': 'News Channel 3',
         'rtsp_url': 'rtsp://admin:Admin123.@192.168.2.173:554/Streaming/Channels/301',
-        'enabled': True,
+        'enabled': False,
         'priority': 'medium'
     },
     'channel_4': {
         'name': 'News Channel 4',
         'rtsp_url': 'rtsp://admin:Admin123.@192.168.2.173:554/Streaming/Channels/401',
-        'enabled': True,
+        'enabled': False,
         'priority': 'medium'
     },
 }
@@ -120,9 +127,9 @@ DATABASE_CONFIG = {
 
 # Processing Configuration
 PROCESSING_CONFIG = {
-    'frame_interval': 2.0,  # Capture + OCR one frame every 2 seconds
+    'frame_interval': 1.0,  # Capture one frame every second
     'batch_size': 4,
-    # How many queued frames to OCR per processing tick (1 = steady ~2s cadence)
+    # How many queued frames to OCR per processing tick (1 = steady ~1s cadence)
     'ocr_frames_per_tick': 1,
     'max_queue_size': 100,
     # App-wide floor: discard low-confidence OCR before DB / UI
@@ -132,13 +139,23 @@ PROCESSING_CONFIG = {
     'min_region_height_px': 22,
     'min_region_width_px': 80,
     'duplicate_text_threshold': 0.8,  # Similarity threshold to avoid duplicates
+    # Soft per-region crop change gate (YouTube compression + RTSP tickers):
+    # shrink → grayscale → light blur → mean abs diff vs last crop.
+    # Only run UTRNet/Ollama when a ticker/headline crop actually changed.
+    'crop_change_enabled': True,
+    'crop_change_width': 160,
+    'crop_change_height': 32,
+    'crop_change_blur': 3,  # odd kernel; 0/1 = no blur
+    'crop_change_mean_diff': 2.5,  # 0–255; below = unchanged (ignores stream noise)
+    # Re-OCR anyway after this many seconds with no change (catch rare soft-misses)
+    'crop_change_force_ocr_sec': 15.0,
     # Save OCR region crops for debugging (raw always; preprocessed when mode != none)
     'save_ocr_crops': True,
     # Crop preprocess before UTRNet / Ollama:
     #   "none"          — raw crop
     #   "clahe_otsu"    — grayscale CLAHE + Otsu (legacy binary enhance)
     #   "clear_text_hd" — upscale + NLMeans denoise + unsharp (color-preserving)
-    'ocr_preprocess': 'clear_text_hd',
+    'ocr_preprocess': 'none',
     # Legacy: if True and ocr_preprocess is "none", behaves like "clahe_otsu"
     'ocr_enhance_crop': False,
 }
@@ -149,14 +166,14 @@ OLLAMA_OCR_CONFIG = {
     'enabled': True,
     'base_url': os.environ.get('OLLAMA_HOST', 'http://127.0.0.1:11434').rstrip('/'),
     # Prefer a vision model that fits beside UTRNet on 16GB (qwen3.6:latest is ~23GB)
-    'model': os.environ.get('OLLAMA_OCR_MODEL', 'gemma4:31b'),
+    'model': os.environ.get('OLLAMA_OCR_MODEL', 'gemma4:12b'),
     'utrnet_min': 0.85,   # below this → discard (do not call Ollama)
     'utrnet_high': 0.97,  # at/above this → trust UTRNet, skip Ollama
     'save_min_confidence': 0.95,  # only persist Ollama replies at/above this
     # Save crop + metadata when Ollama reply is below save_min (debug / review)
     'save_rejected': True,
     'timeout_sec': 45.0,
-    'max_image_width': 640,
+    'max_image_width': 1280,
     'jpeg_quality': 100,
     'keep_alive': '10m',
     'num_predict': 120,
@@ -173,7 +190,7 @@ AUTO_START_MONITORING = True
 
 # Speech Recognition Configuration
 SPEECH_CONFIG = {
-    'enabled': True,
+    'enabled': False,
     'model': 'openai/whisper-large-v3-turbo',  # Can use wav2vec2-xlsr-53-urdu as well
     'chunk_duration': 30,  # seconds
     'overlap': 5,  # seconds

@@ -97,6 +97,9 @@ class NewsMonitor:
         
         self.text_cache = {}  # Cache recent text to avoid duplicates
         self.last_frame_hash = None
+        # Soft fingerprints of ticker/headline crops (region_name -> float32 array)
+        self.last_crop_fp: Dict[str, np.ndarray] = {}
+        self.last_crop_ocr_time: Dict[str, float] = {}
         
         # Setup directories
         self._setup_directories()
@@ -210,6 +213,8 @@ class NewsMonitor:
                 'last_frame_time': None,
             })
             self.last_frame_hash = None
+            self.last_crop_fp.clear()
+            self.last_crop_ocr_time.clear()
             self._clear_queues()
 
             self.is_running = True
@@ -353,19 +358,34 @@ class NewsMonitor:
                 return None
             return self._latest_preview_frame.copy()
 
-    def _clear_queues(self):
-        """Clear processing queues"""
-        while not self.frame_queue.empty():
+    def clear_queues(self) -> Dict[str, int]:
+        """Drop all queued frames/audio. Returns counts removed."""
+        dropped_frames = 0
+        dropped_audio = 0
+        while True:
             try:
                 self.frame_queue.get_nowait()
+                dropped_frames += 1
             except queue.Empty:
                 break
-
-        while not self.audio_queue.empty():
+        while True:
             try:
                 self.audio_queue.get_nowait()
+                dropped_audio += 1
             except queue.Empty:
                 break
+        if dropped_frames or dropped_audio:
+            logging.info(
+                "Cleared queues on %s (frames=%s, audio=%s)",
+                self.channel_name,
+                dropped_frames,
+                dropped_audio,
+            )
+        return {"frames": dropped_frames, "audio": dropped_audio}
+
+    def _clear_queues(self):
+        """Clear processing queues"""
+        self.clear_queues()
     
     def _wait_reconnect(self, seconds: float = 120.0) -> None:
         """Sleep up to `seconds` while still running (interruptible)."""
@@ -452,6 +472,12 @@ class NewsMonitor:
                             'timestamp': datetime.now(),
                             'frame_time': current_time
                         }
+                        # Keep queue near-live: drop backlog before enqueue
+                        while self.frame_queue.qsize() > 0:
+                            try:
+                                self.frame_queue.get_nowait()
+                            except queue.Empty:
+                                break
                         self.frame_queue.put(frame_data, timeout=0.1)
                         last_frame_time = current_time
                         self.stats['last_frame_time'] = current_time
@@ -572,10 +598,15 @@ class NewsMonitor:
         result: Dict,
         timestamp: datetime,
         frame_hash: str,
-        screenshot_image: Optional[np.ndarray] = None,
+        ocr_crop: Optional[np.ndarray] = None,
+        full_frame: Optional[np.ndarray] = None,
         source_label: str = "frame",
     ) -> None:
-        """Store OCR result, alerts, and cache updates for one region."""
+        """Store OCR result, alerts, and cache updates for one region.
+
+        ocr_crop: region pixels for Ollama refine / rejected debug (crops live in ocr_crops/).
+        full_frame: entire captured frame saved to screenshots/ for the UI.
+        """
         raw_text = (result.get("text") or "").strip()
         utr_conf = float(result.get("confidence") or 0.0)
         ollama = self.ollama_ocr
@@ -594,7 +625,7 @@ class NewsMonitor:
 
         # Mid band (80% ≤ conf < 98%) → Ollama vision refine; only keep high-conf replies
         if ollama is not None and ollama.utrnet_needs_ollama(utr_conf):
-            if screenshot_image is None or getattr(screenshot_image, "size", 0) == 0:
+            if ocr_crop is None or getattr(ocr_crop, "size", 0) == 0:
                 logging.info(
                     "Ollama skip (%s/%s): mid-conf utr=%.3f but no crop image",
                     source_label,
@@ -610,7 +641,7 @@ class NewsMonitor:
                 raw_text[:40],
             )
             ollama_text, ollama_conf = ollama.refine(
-                screenshot_image,
+                ocr_crop,
                 draft_text=raw_text,
                 draft_confidence=utr_conf,
             )
@@ -625,7 +656,7 @@ class NewsMonitor:
                     (ollama_text or raw_text)[:60],
                 )
                 self._save_ollama_rejected(
-                    screenshot_image,
+                    ocr_crop,
                     timestamp=timestamp,
                     region_name=region_name,
                     utr_conf=utr_conf,
@@ -671,9 +702,10 @@ class NewsMonitor:
         if confidence < PROCESSING_CONFIG["ocr_confidence_threshold"]:
             return
 
+        # Full frame → screenshots/; region crops are written separately to ocr_crops/
         screenshot_path = None
-        if result.get("priority") == "high" and screenshot_image is not None:
-            screenshot_path = self._save_region_image(screenshot_image, timestamp, region_name)
+        if result.get("priority") == "high" and full_frame is not None:
+            screenshot_path = self._save_screenshot(full_frame, timestamp, region_name)
 
         extraction_uuid = self.database.insert_text_extraction(
             region_name=region_name,
@@ -716,7 +748,7 @@ class NewsMonitor:
         if not frames_to_process:
             return
 
-        # Drop stale backlog so OCR stays near live (every ~2s), not minutes behind
+        # Drop stale backlog so OCR stays near live (~1s), not minutes behind
         dropped = 0
         while self.frame_queue.qsize() > 1:
             try:
@@ -726,7 +758,7 @@ class NewsMonitor:
                 break
         if dropped:
             logging.debug(
-                "Dropped %s stale queued frames on %s to keep 2s OCR live",
+                "Dropped %s stale queued frames on %s to keep 1s OCR live",
                 dropped,
                 self.channel_name,
             )
@@ -741,45 +773,151 @@ class NewsMonitor:
         timestamp = frame_data['timestamp']
         
         try:
-            frame_hash = self._calculate_frame_hash(frame)
-
-            # Skip unchanged frames — avoids duplicate OCR/crops/DB rows
-            if frame_hash == self.last_frame_hash:
-                return
-            self.last_frame_hash = frame_hash
-
             regions = self._get_text_regions()
             if not regions:
                 return
 
+            # Soft per-region crop gate: OCR only tickers/headlines that changed
+            # (ignores full-frame news-video motion + YouTube/RTSP compression noise).
+            changed_regions = self._filter_changed_regions(frame, regions)
+            if not changed_regions:
+                return
+
+            frame_hash = self._calculate_frame_hash(frame)
+            self.last_frame_hash = frame_hash
+
             extraction_results = self.utr_predictor.extract_text_regions(
                 frame,
-                regions,
+                changed_regions,
                 channel_name=self.channel_name,
             )
             
             for region_name, result in extraction_results.items():
-                # Prefer the same preprocessed crop UTRNet used (clear_text_hd etc.)
-                screenshot_image = result.get("ocr_image")
-                if screenshot_image is None or getattr(screenshot_image, "size", 0) == 0:
-                    screenshot_image = frame
+                # Crop for Ollama / debug only — full frame goes to screenshots/
+                ocr_crop = result.get("ocr_image")
+                if ocr_crop is None or getattr(ocr_crop, "size", 0) == 0:
                     coords = result.get("region")
                     if coords and len(coords) == 4:
                         x1, y1, x2, y2 = [int(v) for v in coords]
                         crop = frame[y1:y2, x1:x2]
                         if crop.size > 0:
-                            screenshot_image = crop
+                            ocr_crop = crop
                 self._apply_region_extraction(
                     region_name=region_name,
                     result=result,
                     timestamp=timestamp,
                     frame_hash=frame_hash,
-                    screenshot_image=screenshot_image,
+                    ocr_crop=ocr_crop,
+                    full_frame=frame,
                     source_label="frame",
                 )
             
         except Exception as e:
             logging.error(f"Error processing frame: {e}")
+
+    def _crop_fingerprint(self, crop: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Compact grayscale fingerprint for soft ticker change detection.
+        Downscale + optional blur so YouTube/RTSP compression flicker is ignored.
+        """
+        if crop is None or getattr(crop, "size", 0) == 0:
+            return None
+        tw = max(8, int(PROCESSING_CONFIG.get("crop_change_width", 160)))
+        th = max(8, int(PROCESSING_CONFIG.get("crop_change_height", 32)))
+        small = cv2.resize(crop, (tw, th), interpolation=cv2.INTER_AREA)
+        if len(small.shape) == 3:
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = small
+        blur_k = int(PROCESSING_CONFIG.get("crop_change_blur", 3) or 0)
+        if blur_k >= 3:
+            if blur_k % 2 == 0:
+                blur_k += 1
+            gray = cv2.GaussianBlur(gray, (blur_k, blur_k), 0)
+        return gray.astype(np.float32)
+
+    def _crop_mean_diff(self, a: np.ndarray, b: np.ndarray) -> float:
+        """Mean absolute pixel difference (0–255 scale)."""
+        if a is None or b is None or a.shape != b.shape:
+            return 255.0
+        return float(np.mean(np.abs(a - b)))
+
+    def _filter_changed_regions(self, frame: np.ndarray, regions: Dict) -> Dict:
+        """
+        Keep only regions whose ticker/headline crop changed enough to OCR.
+        Uses mean abs diff on a blurred downscale — better than exact MD5 for
+        live YouTube and RTSP news streams.
+        """
+        if not PROCESSING_CONFIG.get("crop_change_enabled", True):
+            return dict(regions)
+
+        h, w = frame.shape[:2]
+        min_h = int(PROCESSING_CONFIG.get("min_region_height_px", 22))
+        min_w = int(PROCESSING_CONFIG.get("min_region_width_px", 80))
+        threshold = float(PROCESSING_CONFIG.get("crop_change_mean_diff", 10.0))
+        force_sec = float(PROCESSING_CONFIG.get("crop_change_force_ocr_sec", 30.0) or 0.0)
+        now = time.time()
+        changed: Dict = {}
+
+        for region_name, region_config in regions.items():
+            try:
+                x1, y1, x2, y2 = region_config["region"]
+                x1, y1, x2, y2 = int(x1 * w), int(y1 * h), int(x2 * w), int(y2 * h)
+                crop = frame[y1:y2, x1:x2]
+                if (
+                    crop.size == 0
+                    or crop.shape[0] < min_h
+                    or crop.shape[1] < min_w
+                ):
+                    continue
+
+                fp = self._crop_fingerprint(crop)
+                if fp is None:
+                    continue
+
+                prev = self.last_crop_fp.get(region_name)
+                last_ocr = self.last_crop_ocr_time.get(region_name, 0.0)
+                force = (
+                    force_sec > 0
+                    and prev is not None
+                    and (now - last_ocr) >= force_sec
+                )
+                diff = (
+                    self._crop_mean_diff(prev, fp) if prev is not None else 255.0
+                )
+
+                if prev is not None and not force and diff < threshold:
+                    continue
+
+                self.last_crop_fp[region_name] = fp
+                self.last_crop_ocr_time[region_name] = now
+                changed[region_name] = region_config
+                if force and diff < threshold:
+                    logging.debug(
+                        "Force OCR %s/%s after %.0fs (diff=%.1f < thr=%.1f)",
+                        self.channel_name,
+                        region_name,
+                        now - last_ocr,
+                        diff,
+                        threshold,
+                    )
+                elif prev is not None:
+                    logging.debug(
+                        "Crop changed %s/%s mean_diff=%.1f",
+                        self.channel_name,
+                        region_name,
+                        diff,
+                    )
+            except Exception as e:
+                logging.warning(
+                    "Crop-change check failed for %s/%s: %s — OCR anyway",
+                    self.channel_name,
+                    region_name,
+                    e,
+                )
+                changed[region_name] = region_config
+
+        return changed
     
     def _process_audio_transcriptions(self):
         """Process audio transcription results"""
@@ -829,7 +967,7 @@ class NewsMonitor:
                 logging.error(f"Error processing audio transcription: {e}")
     
     def _calculate_frame_hash(self, frame: np.ndarray) -> str:
-        """Calculate hash of frame for duplicate detection"""
+        """Calculate hash of frame for DB / duplicate linking"""
         # Resize frame for faster hashing
         small_frame = cv2.resize(frame, (64, 64))
         gray_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
@@ -862,17 +1000,17 @@ class NewsMonitor:
         
         return False
     
-    def _save_region_image(
-        self, image: np.ndarray, timestamp: datetime, region_name: str
+    def _save_screenshot(
+        self, frame: np.ndarray, timestamp: datetime, region_name: str
     ) -> Optional[Path]:
-        """Save a region crop image."""
+        """Save full-frame screenshot (region crops belong in ocr_crops/)."""
         try:
             filename = f"{timestamp.strftime('%Y%m%d_%H%M%S')}_{region_name}_{self.channel_name}.jpg"
             filepath = STORAGE_CONFIG['screenshots_dir'] / filename
-            cv2.imwrite(str(filepath), image)
+            cv2.imwrite(str(filepath), frame)
             return filepath
         except Exception as e:
-            logging.error(f"Error saving region image: {e}")
+            logging.error(f"Error saving screenshot: {e}")
             return None
 
     def _save_ollama_rejected(
@@ -931,10 +1069,6 @@ class NewsMonitor:
             logging.warning(f"Failed to save Ollama rejected crop ({region_name}): {e}")
             return None
 
-    def _save_screenshot(self, frame: np.ndarray, timestamp: datetime, region_name: str) -> Optional[Path]:
-        """Save screenshot of frame"""
-        return self._save_region_image(frame, timestamp, region_name)
-    
     def _check_text_alerts(self, content_id: str, text: str):
         """Check text for alert keywords"""
         if ALERTS_CONFIG['enabled']:
@@ -1182,6 +1316,18 @@ class MultiChannelNewsMonitor:
         self.shared_ocr.cleanup()
 
         logging.info("Multi-channel monitoring stopped")
+
+    def clear_queues(self) -> Dict[str, int]:
+        """Empty frame/audio queues on every channel monitor."""
+        totals = {"frames": 0, "audio": 0}
+        for monitor in self.monitors.values():
+            try:
+                dropped = monitor.clear_queues()
+                totals["frames"] += dropped.get("frames", 0)
+                totals["audio"] += dropped.get("audio", 0)
+            except Exception as e:
+                logging.warning("Failed to clear queues on %s: %s", monitor.channel_name, e)
+        return totals
 
     def get_statistics(self) -> Dict:
         """Get combined statistics for all channels"""

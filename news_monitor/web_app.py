@@ -686,6 +686,27 @@ def api_stop_monitor():
         logging.error(f"Error stopping monitor: {e}")
         return jsonify({'error': str(e)}), 500
 
+
+@app.route('/api/monitor/clear-queue', methods=['POST'])
+def api_clear_queue():
+    """Drop all queued frames/audio so OCR catches up to live."""
+    try:
+        if not news_monitor_instance:
+            return jsonify({'success': True, 'dropped': {'frames': 0, 'audio': 0},
+                            'message': 'No monitor running'})
+        clearer = getattr(news_monitor_instance, 'clear_queues', None)
+        if clearer is None:
+            return jsonify({'error': 'Monitor does not support clear_queues'}), 400
+        dropped = clearer()
+        return jsonify({
+            'success': True,
+            'dropped': dropped,
+            'message': f"Cleared {dropped.get('frames', 0)} frames, {dropped.get('audio', 0)} audio",
+        })
+    except Exception as e:
+        logging.error(f"Error clearing monitor queue: {e}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/config')
 def api_config():
     """Read-only configuration for settings UI."""
