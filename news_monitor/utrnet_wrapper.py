@@ -12,6 +12,7 @@ from collections import Counter
 from pathlib import Path
 import torch
 import numpy as np
+import time
 from PIL import Image
 from typing import List, Tuple, Optional, Set
 import cv2
@@ -269,6 +270,9 @@ class UTRNetPredictor:
             Dictionary with region names as keys and extraction results as values
         """
         results = {}
+        t0 = time.perf_counter()
+        lock_wait_total_s = 0.0
+        infer_total_s = 0.0
         h, w = frame.shape[:2]
         
         for region_name, region_config in regions.items():
@@ -325,8 +329,12 @@ class UTRNetPredictor:
                         suffix=preprocess_mode,
                         base_hash=raw_hash,
                     )
+                lock_wait_t0 = time.perf_counter()
                 with self._infer_lock:
+                    lock_wait_total_s += time.perf_counter() - lock_wait_t0
+                    infer_t0 = time.perf_counter()
                     text, confidence = self.predict_single(ocr_input)
+                    infer_total_s += time.perf_counter() - infer_t0
 
                 # Always return prediction + confidence. Pipeline decides:
                 # high (≥98%) keep, mid (80–98%) Ollama refine, low discard.
@@ -352,6 +360,18 @@ class UTRNetPredictor:
                     'priority': region_config.get('priority', 'medium')
                 }
         
+        total_s = time.perf_counter() - t0
+        if channel_name:
+            # Timing for UTRNet can be very noisy in multi-channel mode.
+            # User request: remove timing logs from UTRNet (keep only Ollama timings).
+            logging.debug(
+                "UTRNet timing channel=%s regions=%s total=%.2fs infer=%.2fs lock_wait=%.2fs",
+                channel_name,
+                len(regions or {}),
+                total_s,
+                infer_total_s,
+                lock_wait_total_s,
+            )
         return results
 
     def cleanup(self):
@@ -546,13 +566,71 @@ def preprocess_region_for_ocr(region_img: np.ndarray) -> np.ndarray:
 
 
 def region_likely_contains_text(region_img: np.ndarray) -> bool:
-    """Skip uniform/blank bands (video background mistaken for ticker)."""
-    gray = cv2.cvtColor(region_img, cv2.COLOR_BGR2GRAY)
-    if float(np.std(gray)) < 14.0:
+    """
+    Fast "does this look like text?" gate.
+
+    Goal: reject obvious garbage crops before running the (slower) UTRNet,
+    without adding meaningful latency (should be << 0.1s per crop).
+    """
+    if region_img is None or getattr(region_img, "size", 0) == 0:
         return False
-    edges = cv2.Canny(gray, 50, 150)
+
+    # Downscale for speed; ticker crops are typically wide + short.
+    h, w = region_img.shape[:2]
+    if h < 2 or w < 2:
+        return False
+    # Keep aspect-ish: fixed "analysis height" is enough to capture glyph structure.
+    analysis_h = int(PROCESSING_CONFIG.get("text_gate_analysis_h", 32))
+    analysis_w = int(
+        min(
+            max(64, analysis_h * max(1, w / max(1.0, h))),
+            PROCESSING_CONFIG.get("text_gate_max_w", 320),
+        )
+    )
+    small = cv2.resize(region_img, (analysis_w, analysis_h), interpolation=cv2.INTER_AREA)
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+
+    # 1) Reject uniform/flat regions.
+    min_std = float(PROCESSING_CONFIG.get("text_gate_min_std", 14.0))
+    if float(np.std(gray)) < min_std:
+        return False
+
+    # 2) Edge density (helps catch motion blur / background gradients).
+    canny1 = int(PROCESSING_CONFIG.get("text_gate_canny1", 50))
+    canny2 = int(PROCESSING_CONFIG.get("text_gate_canny2", 150))
+    edges = cv2.Canny(gray, canny1, canny2)
     edge_ratio = float(np.count_nonzero(edges)) / max(edges.size, 1)
-    return edge_ratio >= 0.01
+    min_edge_ratio = float(PROCESSING_CONFIG.get("text_gate_min_edge_ratio", 0.01))
+    if edge_ratio < min_edge_ratio:
+        return False
+
+    # 3) Foreground pixel ratio from adaptive threshold.
+    #    If it's "almost all background" or "almost all noise", reject.
+    block = int(PROCESSING_CONFIG.get("text_gate_adaptive_block", 21))
+    if block < 3:
+        block = 3
+    if block % 2 == 0:
+        block += 1
+    thr = cv2.adaptiveThreshold(
+        gray,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        block,
+        int(PROCESSING_CONFIG.get("text_gate_adaptive_c", 5)),
+    )
+    fg_ratio = float(np.count_nonzero(thr)) / max(thr.size, 1)
+    min_fg = float(PROCESSING_CONFIG.get("text_gate_min_fg_ratio", 0.01))
+    max_fg = float(PROCESSING_CONFIG.get("text_gate_max_fg_ratio", 0.55))
+    if fg_ratio < min_fg or fg_ratio > max_fg:
+        return False
+
+    # 4) Horizontal structure: text strokes create row-level variation.
+    #    Background flicker tends to be smoother in the row projection.
+    row_sum = np.sum(thr > 0, axis=1).astype(np.float32)
+    row_var = float(np.var(row_sum))
+    min_row_var = float(PROCESSING_CONFIG.get("text_gate_min_row_var", 10.0))
+    return row_var >= min_row_var
 
 
 def is_plausible_urdu_text(

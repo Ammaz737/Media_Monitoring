@@ -575,10 +575,14 @@ export function RegionEditorDialog({
                       if (e.key === "Enter" || e.key === " ") setActive(key);
                     }}
                     className={cn(
-                      "absolute z-[2] cursor-move border-2 transition-[box-shadow,opacity]",
+                      "absolute z-[2] cursor-move border-[1px] transition-[box-shadow,opacity]",
                       m.fill,
                       isActive
-                        ? cn("z-[3] shadow-[0_0_0_1px_rgba(255,255,255,0.35)]", m.ring, "ring-2")
+                        ? cn(
+                            "z-[3] shadow-[0_0_0_1px_rgba(255,255,255,0.35)]",
+                            m.ring,
+                            "ring-1"
+                          )
                         : "opacity-80 hover:opacity-100"
                     )}
                     style={{

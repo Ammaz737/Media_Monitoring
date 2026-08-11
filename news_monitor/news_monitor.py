@@ -633,6 +633,24 @@ class NewsMonitor:
                     utr_conf,
                 )
                 return
+
+            # Fast gate: if UTRNet draft text is clearly implausible, skip Ollama.
+            # This avoids ~1.5–2s/call latency for crops that are likely garbage.
+            cleaned_draft = clean_urdu_text(raw_text)
+            youtube = is_youtube_url(self.source_url)
+            min_len = 10 if youtube else PROCESSING_CONFIG.get("min_urdu_text_length", 6)
+            min_long = 2 if youtube else 1
+            if not is_plausible_urdu_text(
+                cleaned_draft, min_length=min_len, min_long_words=min_long
+            ):
+                logging.info(
+                    "Skipping Ollama refine: implausible UTRNet draft (%s/%s utr=%.2f): %s",
+                    source_label,
+                    region_name,
+                    utr_conf,
+                    (cleaned_draft or "").strip()[:60],
+                )
+                return
             logging.info(
                 "Ollama refine start (%s/%s): utr=%.3f draft=%s…",
                 source_label,
@@ -702,9 +720,9 @@ class NewsMonitor:
         if confidence < PROCESSING_CONFIG["ocr_confidence_threshold"]:
             return
 
-        # Full frame → screenshots/; region crops are written separately to ocr_crops/
+        # Full frame → screenshots/ for every region (ticker, side_text, …)
         screenshot_path = None
-        if result.get("priority") == "high" and full_frame is not None:
+        if full_frame is not None:
             screenshot_path = self._save_screenshot(full_frame, timestamp, region_name)
 
         extraction_uuid = self.database.insert_text_extraction(

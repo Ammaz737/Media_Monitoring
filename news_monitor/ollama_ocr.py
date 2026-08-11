@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import threading
+import time
 from typing import Any, Dict, Optional, Tuple
 
 import cv2
@@ -114,30 +115,54 @@ class OllamaVisionOcr:
         if not self.enabled or image_bgr is None or getattr(image_bgr, "size", 0) == 0:
             return "", 0.0
 
+        refine_t0 = time.perf_counter()
+
         if self.cfg.get("skip_if_busy", True):
+            lock_wait_t0 = time.perf_counter()
             if not self._lock.acquire(blocking=False):
-                logging.info("Ollama OCR busy — skipping mid-confidence refine")
+                lock_wait_s = time.perf_counter() - lock_wait_t0
+                total_s = time.perf_counter() - refine_t0
+                logging.warning(
+                    "Ollama OCR busy — skipping mid-confidence refine "
+                    "(total=%.2fs lock_wait=%.2fs)",
+                    total_s,
+                    lock_wait_s,
+                )
                 return "", 0.0
+            lock_wait_s = time.perf_counter() - lock_wait_t0
         else:
+            lock_wait_t0 = time.perf_counter()
             self._lock.acquire()
+            lock_wait_s = time.perf_counter() - lock_wait_t0
 
         self._busy = True
         try:
+            ping_t0 = time.perf_counter()
             if not self.ping():
                 logging.warning("Ollama not reachable at %s", self.cfg.get("base_url"))
                 return "", 0.0
+            ping_s = time.perf_counter() - ping_t0
+
+            payload_t0 = time.perf_counter()
             payload = self._build_payload(image_bgr, draft_text, draft_confidence)
-            logging.info(
+            payload_s = time.perf_counter() - payload_t0
+
+            call_t0 = time.perf_counter()
+            logging.warning(
                 "Ollama OCR calling model=%s draft_len=%s utr_conf=%s",
                 payload.get("model"),
                 len(draft_text or ""),
                 f"{float(draft_confidence):.3f}" if draft_confidence is not None else "n/a",
             )
             raw = self._post_generate(payload)
+            call_s = time.perf_counter() - call_t0
+
+            parse_t0 = time.perf_counter()
             text, confidence = self._parse_response(raw)
+            parse_s = time.perf_counter() - parse_t0
             if not text.strip():
                 confidence = min(confidence, 0.05)
-            logging.info(
+            logging.warning(
                 "Ollama OCR result conf=%.3f text_len=%s",
                 confidence,
                 len(text.strip()),
@@ -150,6 +175,14 @@ class OllamaVisionOcr:
         finally:
             self._busy = False
             self._lock.release()
+            total_s = time.perf_counter() - refine_t0
+            # Keep this last log in finally so we also see timings for failures.
+            # (The ping/payload/call/parse logs above may be skipped when ping fails early.)
+            logging.warning(
+                "Ollama OCR timing total=%.2fs lock_wait=%.2fs",
+                total_s,
+                lock_wait_s,
+            )
 
     def _encode_image(self, image_bgr: np.ndarray) -> str:
         img = image_bgr

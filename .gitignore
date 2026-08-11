@@ -39,3 +39,7 @@ Thumbs.db
 
 # Cursor uploads
 uploads/
+.agents
+venv_opencv5/
+news_monitor/data/exp_ch6_crops/
+news_monitor/data/exp_channel_7_crops/

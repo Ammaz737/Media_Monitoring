@@ -155,9 +155,24 @@ PROCESSING_CONFIG = {
     #   "none"          — raw crop
     #   "clahe_otsu"    — grayscale CLAHE + Otsu (legacy binary enhance)
     #   "clear_text_hd" — upscale + NLMeans denoise + unsharp (color-preserving)
-    'ocr_preprocess': 'none',
+    'ocr_preprocess': 'clear_text_hd',
     # Legacy: if True and ocr_preprocess is "none", behaves like "clahe_otsu"
     'ocr_enhance_crop': False,
+
+    # --- Fast pre-UTR text gate (reject garbage before UTRNet) ---
+    # Keep this cheap: OpenCV-only, used by `utrnet_wrapper.region_likely_contains_text`.
+    # Thresholds are deliberately permissive defaults; tune if you see under/over-rejection.
+    'text_gate_analysis_h': 32,
+    'text_gate_max_w': 320,
+    'text_gate_min_std': 16.0,
+    'text_gate_canny1': 50,
+    'text_gate_canny2': 150,
+    'text_gate_min_edge_ratio': 0.015,
+    'text_gate_adaptive_block': 21,
+    'text_gate_adaptive_c': 5,
+    'text_gate_min_fg_ratio': 0.02,
+    'text_gate_max_fg_ratio': 0.50,
+    'text_gate_min_row_var': 20.0,
 }
 
 # Ollama vision OCR fallback for mid-confidence UTRNet results
@@ -180,7 +195,7 @@ OLLAMA_OCR_CONFIG = {
     # Disable chain-of-thought so JSON fits in num_predict
     'think': False,
     # Drop refine if another call is in flight (avoid backlog / stall)
-    'skip_if_busy': True,
+    'skip_if_busy': False,
 }
 
 # Auto-start RTSP monitoring when Flask boots.
