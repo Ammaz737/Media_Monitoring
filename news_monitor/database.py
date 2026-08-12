@@ -246,7 +246,8 @@ class NewsDatabase:
                                  audio_path: str = None,
                                  language: str = 'urdu',
                                  channel_name: str = 'unknown',
-                                 record_uuid: str = None) -> str:
+                                 record_uuid: str = None,
+                                 timestamp: datetime = None) -> str:
         """
         Insert an audio transcription record
         
@@ -254,7 +255,7 @@ class NewsDatabase:
             UUID of the inserted record
         """
         record_uuid = record_uuid or str(uuid.uuid4())
-        timestamp = datetime.now()
+        timestamp = timestamp or datetime.now()
         
         with self.lock:
             try:

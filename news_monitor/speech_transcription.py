@@ -11,6 +11,7 @@ from typing import List, Tuple, Optional
 import threading
 import queue
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 import tempfile
 import wave
@@ -310,25 +311,34 @@ class AudioBuffer:
         self.stride = self.chunk_size - self.overlap_size
         
         self.buffer = np.array([], dtype=np.float32)
+        self._buffer_time_origin: Optional[datetime] = None
         self.lock = threading.Lock()
     
-    def add_audio(self, audio_data: np.ndarray):
-        """Add audio data to buffer"""
+    def add_audio(
+        self, audio_data: np.ndarray, wall_start: Optional[datetime] = None
+    ):
+        """Add audio data to buffer. wall_start = wall clock when capture began."""
         with self.lock:
+            if len(self.buffer) == 0 and wall_start is not None:
+                self._buffer_time_origin = wall_start
             self.buffer = np.concatenate([self.buffer, audio_data])
     
-    def get_chunks(self) -> List[np.ndarray]:
-        """Get available audio chunks for processing"""
+    def get_chunks(self) -> List[tuple]:
+        """Get available audio chunks as (samples, wall_start_datetime)."""
         chunks = []
         
         with self.lock:
             while len(self.buffer) >= self.chunk_size:
-                # Extract chunk
                 chunk = self.buffer[:self.chunk_size].copy()
-                chunks.append(chunk)
-                
-                # Move buffer forward by stride
+                start = self._buffer_time_origin or datetime.now()
+                chunks.append((chunk, start))
                 self.buffer = self.buffer[self.stride:]
+                if len(self.buffer) == 0:
+                    self._buffer_time_origin = None
+                elif self._buffer_time_origin is not None:
+                    self._buffer_time_origin += timedelta(
+                        seconds=self.stride / self.sample_rate
+                    )
         
         return chunks
     
@@ -336,6 +346,7 @@ class AudioBuffer:
         """Clear the buffer"""
         with self.lock:
             self.buffer = np.array([], dtype=np.float32)
+            self._buffer_time_origin = None
 
 
 class RealtimeSpeechTranscriber:
@@ -380,10 +391,12 @@ class RealtimeSpeechTranscriber:
             self.processing_thread.join(timeout=5.0)
         logging.info("Real-time speech transcription stopped")
     
-    def add_audio(self, audio_data: np.ndarray):
-        """Add audio data for transcription"""
+    def add_audio(
+        self, audio_data: np.ndarray, wall_start: Optional[datetime] = None
+    ):
+        """Add audio data for transcription. wall_start = when live capture began."""
         if self.is_running:
-            self.audio_buffer.add_audio(audio_data)
+            self.audio_buffer.add_audio(audio_data, wall_start=wall_start)
     
     def _processing_loop(self):
         """Main processing loop for transcription"""
@@ -391,16 +404,16 @@ class RealtimeSpeechTranscriber:
             try:
                 chunks = self.audio_buffer.get_chunks()
                 
-                for chunk in chunks:
+                for chunk, chunk_start in chunks:
                     if not self.is_running:
                         break
                     
-                    start_time = time.time()
+                    proc_start = time.time()
                     
                     # Transcribe chunk
                     text, confidence = self.transcriber.transcribe(chunk)
                     
-                    processing_time = time.time() - start_time
+                    processing_time = time.time() - proc_start
                     
                     # Update statistics
                     self.total_chunks_processed += 1
@@ -411,7 +424,7 @@ class RealtimeSpeechTranscriber:
                         result = {
                             'text': text.strip(),
                             'confidence': confidence,
-                            'timestamp': time.time(),
+                            'chunk_start': chunk_start,
                             'processing_time': processing_time,
                             'chunk_duration': len(chunk) / self.audio_buffer.sample_rate,
                             'audio_data': chunk.copy(),

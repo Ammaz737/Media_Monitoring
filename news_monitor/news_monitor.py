@@ -11,7 +11,7 @@ import queue
 import hashlib
 import uuid
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 import json
@@ -583,12 +583,17 @@ class NewsMonitor:
 
                 consecutive_failures = 0
                 if self.speech_transcriber:
+                    actual_sec = len(audio_data) / SPEECH_CONFIG['sample_rate']
+                    capture_start = datetime.now() - timedelta(seconds=actual_sec)
                     logging.debug(
-                        "Queued %.2fs audio for transcription on %s",
-                        len(audio_data) / SPEECH_CONFIG['sample_rate'],
+                        "Queued %.2fs audio for transcription on %s (start %s)",
+                        actual_sec,
                         self.channel_name,
+                        capture_start.isoformat(timespec='seconds'),
                     )
-                    self.speech_transcriber.add_audio(audio_data)
+                    self.speech_transcriber.add_audio(
+                        audio_data, wall_start=capture_start
+                    )
                 
             except Exception as e:
                 logging.error(f"Error in audio capture loop: {e}")
@@ -1012,6 +1017,10 @@ class NewsMonitor:
                             if saved:
                                 audio_path = str(saved)
 
+                        audio_start = transcription.get('chunk_start')
+                        if not isinstance(audio_start, datetime):
+                            audio_start = None
+
                         # Store in database
                         transcription_uuid = self.database.insert_audio_transcription(
                             text=cleaned_text,
@@ -1020,6 +1029,7 @@ class NewsMonitor:
                             audio_path=audio_path,
                             channel_name=self.channel_name,
                             record_uuid=record_uuid,
+                            timestamp=audio_start,
                         )
                         
                         if transcription_uuid:
