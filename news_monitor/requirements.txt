@@ -23,6 +23,8 @@ yt-dlp
 
 # Utilities
 requests
+inference-sdk
+
 python-dateutil
 pytz
 uuid

@@ -127,7 +127,7 @@ DATABASE_CONFIG = {
 
 # Processing Configuration
 PROCESSING_CONFIG = {
-    'frame_interval': 1.0,  # Capture one frame every second
+    'frame_interval': 2.0,  # Roboflow capture cadence (seconds)
     'batch_size': 4,
     # How many queued frames to OCR per processing tick (1 = steady ~1s cadence)
     'ocr_frames_per_tick': 1,
@@ -146,9 +146,9 @@ PROCESSING_CONFIG = {
     'crop_change_width': 160,
     'crop_change_height': 32,
     'crop_change_blur': 3,  # odd kernel; 0/1 = no blur
-    'crop_change_mean_diff': 2.5,  # 0–255; below = unchanged (ignores stream noise)
+    'crop_change_mean_diff': 10.0,  # 0–255; below = unchanged ticker pixels
     # Re-OCR anyway after this many seconds with no change (catch rare soft-misses)
-    'crop_change_force_ocr_sec': 15.0,
+    'crop_change_force_ocr_sec': 30.0,
     # Save OCR region crops for debugging (raw always; preprocessed when mode != none)
     'save_ocr_crops': True,
     # Crop preprocess before UTRNet / Ollama:
@@ -196,6 +196,17 @@ OLLAMA_OCR_CONFIG = {
     'think': False,
     # Drop refine if another call is in flight (avoid backlog / stall)
     'skip_if_busy': False,
+}
+
+# Roboflow dynamic ticker detection (RTSP only — same model as script.py)
+ROBOFLOW_CONFIG = {
+    'enabled': True,
+    'model_id': 'detection-of-news-bottom-tickers/2',
+    'api_url': 'https://serverless.roboflow.com',
+    'api_key': os.environ.get('ROBOFLOW_API_KEY', 'kPvHrHsrS6S5pm0RLf2h').strip(),
+    'det_conf_min': 0.35,
+    'ocr_classes': {'ArtificialUrdu', 'bottom ticker', 'mid ticker text'},
+    'primary_pref': ('ArtificialUrdu', 'bottom ticker', 'mid ticker text'),
 }
 
 # Auto-start RTSP monitoring when Flask boots.

@@ -19,7 +19,7 @@ import json
 from config import (
     RTSP_CHANNELS, RTSP_URL, TEXT_REGIONS, YOUTUBE_TEXT_REGIONS,
     PROCESSING_CONFIG, STORAGE_CONFIG, ALERTS_CONFIG, SPEECH_CONFIG,
-    OLLAMA_OCR_CONFIG,
+    OLLAMA_OCR_CONFIG, ROBOFLOW_CONFIG,
     normalize_text_regions,
 )
 from utrnet_wrapper import (
@@ -103,6 +103,7 @@ class NewsMonitor:
         # Soft fingerprints of ticker/headline crops (region_name -> float32 array)
         self.last_crop_fp: Dict[str, np.ndarray] = {}
         self.last_crop_ocr_time: Dict[str, float] = {}
+        self._roboflow_box: Optional[Tuple] = None  # (cls, x1, y1, x2, y2) pixels
         
         # Setup directories
         self._setup_directories()
@@ -221,6 +222,7 @@ class NewsMonitor:
             self.last_frame_hash = None
             self.last_crop_fp.clear()
             self.last_crop_ocr_time.clear()
+            self._roboflow_box = None
             self._clear_queues()
 
             self.is_running = True
@@ -352,6 +354,9 @@ class NewsMonitor:
         if is_youtube_url(self.source_url):
             return YOUTUBE_TEXT_REGIONS
         return TEXT_REGIONS
+
+    def _use_roboflow_ticker(self) -> bool:
+        return bool(ROBOFLOW_CONFIG.get("enabled")) and not is_youtube_url(self.source_url)
 
     def set_text_regions(self, regions: Optional[Dict]) -> None:
         """Hot-update OCR crop boxes for this channel (Settings editor)."""
@@ -820,12 +825,18 @@ class NewsMonitor:
         timestamp = frame_data['timestamp']
         
         try:
-            regions = self._get_text_regions()
+            if self._use_roboflow_ticker():
+                from roboflow_ticker import regions_from_detection
+
+                regions, self._roboflow_box = regions_from_detection(
+                    frame, self.channel_name, self._roboflow_box
+                )
+            # else:
+            #     regions = self._get_text_regions()
             if not regions:
                 return
 
-            # Soft per-region crop gate: OCR only tickers/headlines that changed
-            # (ignores full-frame news-video motion + YouTube/RTSP compression noise).
+            # Pixel dedup before UTRNet (unchanged gate from script.py thresholds)
             changed_regions = self._filter_changed_regions(frame, regions)
             if not changed_regions:
                 return

@@ -300,7 +300,7 @@ class UTRNetPredictor:
                     }
                     continue
 
-                if not region_likely_contains_text(region_img):
+                if not region_config.get("direct_ocr") and not region_likely_contains_text(region_img):
                     results[region_name] = {
                         'text': '',
                         'confidence': 0.0,
@@ -319,7 +319,11 @@ class UTRNetPredictor:
                     base_hash=raw_hash,
                 )
                 preprocess_mode = resolve_ocr_preprocess_mode()
-                ocr_input = preprocess_region_for_ocr(region_img)
+                if region_config.get("direct_ocr"):
+                    ocr_input = region_img
+                    preprocess_mode = "none"
+                else:
+                    ocr_input = preprocess_region_for_ocr(region_img)
                 if preprocess_mode != "none":
                     # Same original hash + "_clear_text_hd" so HD pairs with raw
                     _save_ocr_crop(
