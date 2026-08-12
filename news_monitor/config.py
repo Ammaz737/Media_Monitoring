@@ -205,8 +205,8 @@ AUTO_START_MONITORING = True
 
 # Speech Recognition Configuration
 SPEECH_CONFIG = {
-    'enabled': False,
-    'model': 'openai/whisper-large-v3-turbo',  # Can use wav2vec2-xlsr-53-urdu as well
+    'enabled': True,
+    'model': 'openai/whisper-large-v3',  # Can use wav2vec2-xlsr-53-urdu as well
     'chunk_duration': 30,  # seconds
     'overlap': 5,  # seconds
     'sample_rate': 16000

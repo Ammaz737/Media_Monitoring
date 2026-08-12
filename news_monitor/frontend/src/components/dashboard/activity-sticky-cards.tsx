@@ -5,6 +5,7 @@ import { Eye } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Dialog, DialogFooter } from "@/components/ui/dialog";
+import { AlertViewModal } from "@/components/alerts/alert-view-modal";
 import type { Alert, AudioTranscription, TextExtraction } from "@/lib/types";
 import {
   cn,
@@ -12,6 +13,7 @@ import {
   hasArabicScript,
   parseKeywords,
   screenshotUrl,
+  transcriptionAudioUrl,
 } from "@/lib/utils";
 
 function ViewFullButton({ onClick }: { onClick: () => void }) {
@@ -224,6 +226,7 @@ export function ExtractionStickyCard({ item }: { item: TextExtraction }) {
 export function TranscriptionStickyCard({ item }: { item: AudioTranscription }) {
   const [open, setOpen] = useState(false);
   const confidencePct = item.confidence * 100;
+  const audioUrl = transcriptionAudioUrl(item.audio_path);
 
   return (
     <>
@@ -261,6 +264,24 @@ export function TranscriptionStickyCard({ item }: { item: AudioTranscription }) 
           <p className="mb-2 text-sm text-slate-500" dir="ltr">
             {item.duration.toFixed(1)}s · {item.channel_name}
           </p>
+          {audioUrl ? (
+            <div className="mb-4 overflow-hidden rounded-xl border border-slate-200 bg-[#F8FAFC] p-3">
+              {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+              <audio
+                controls
+                preload="metadata"
+                src={audioUrl}
+                className="h-10 w-full"
+              />
+            </div>
+          ) : (
+            <p
+              className="mb-4 rounded-xl border border-dashed border-slate-200 bg-[#F8FAFC] px-3 py-4 text-center text-sm text-slate-400"
+              dir="ltr"
+            >
+              No audio clip saved for this transcription
+            </p>
+          )}
           <ModalUrduBlock text={item.transcribed_text} />
           <Progress value={confidencePct} barClassName="mt-4 bg-[#059669]" />
         </div>
@@ -281,7 +302,6 @@ export function AlertStickyCard({
 }) {
   const [open, setOpen] = useState(false);
   const keywords = parseKeywords(item.matched_keywords);
-  const isUnread = !item.is_read;
 
   return (
     <>
@@ -314,33 +334,12 @@ export function AlertStickyCard({
         )}
       </ActivityCardShell>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <div className="pe-8">
-          <div className="mb-3 flex flex-wrap gap-2">
-            {keywords.map((kw) => (
-              <AlertKeywordMini key={kw} kw={kw} />
-            ))}
-          </div>
-          <ModalUrduBlock text={item.alert_text} />
-          <p className="mt-3 text-sm text-slate-500" dir="ltr">
-            {item.severity} · {isUnread ? "Unread" : "Read"}
-          </p>
-        </div>
-        <DialogFooter className="flex-col gap-2 sm:flex-row">
-          {onMarkRead && isUnread && (
-            <Button
-              variant="outline"
-              onClick={() => {
-                onMarkRead(item.uuid);
-                setOpen(false);
-              }}
-            >
-              Mark as Read
-            </Button>
-          )}
-          <Button onClick={() => setOpen(false)}>Close</Button>
-        </DialogFooter>
-      </Dialog>
+      <AlertViewModal
+        item={item}
+        open={open}
+        onOpenChange={setOpen}
+        onMarkRead={onMarkRead}
+      />
     </>
   );
 }

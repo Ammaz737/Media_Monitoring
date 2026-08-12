@@ -35,6 +35,8 @@ export interface Alert {
   severity: "high" | "medium" | "low" | string;
   is_read: boolean;
   channel_name?: string;
+  screenshot_path?: string;
+  audio_path?: string;
 }
 
 export interface DatabaseStats {

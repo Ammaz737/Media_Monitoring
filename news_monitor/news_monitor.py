@@ -9,6 +9,7 @@ import threading
 import time
 import queue
 import hashlib
+import uuid
 import numpy as np
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -37,6 +38,8 @@ from stream_resolver import (
     is_youtube_url,
     ffmpeg_available,
     FfmpegFrameReader,
+    redact_stream_url,
+    stream_url_kind,
 )
 
 class NewsMonitor:
@@ -110,6 +113,8 @@ class NewsMonitor:
         """Create necessary directories"""
         STORAGE_CONFIG['screenshots_dir'].mkdir(parents=True, exist_ok=True)
         STORAGE_CONFIG['audio_clips_dir'].mkdir(parents=True, exist_ok=True)
+        (STORAGE_CONFIG['audio_clips_dir'] / 'transcriptions').mkdir(parents=True, exist_ok=True)
+        (STORAGE_CONFIG['audio_clips_dir'] / 'clips').mkdir(parents=True, exist_ok=True)
         STORAGE_CONFIG['ocr_crops_dir'].mkdir(parents=True, exist_ok=True)
         STORAGE_CONFIG['ollama_rejected_dir'].mkdir(parents=True, exist_ok=True)
         (Path(__file__).parent / 'logs').mkdir(parents=True, exist_ok=True)
@@ -168,6 +173,7 @@ class NewsMonitor:
             if not WHISPER_AVAILABLE:
                 logging.info("Speech transcription disabled - Whisper not available")
                 return False
+            logging.info("Loading Whisper model for %s…", self.channel_name)
             self.speech_transcriber = RealtimeSpeechTranscriber()
             self.speech_transcriber.start()
             logging.info("Speech transcription initialized for %s", self.channel_name)
@@ -522,7 +528,12 @@ class NewsMonitor:
         """Audio capture loop for RTSP / HLS / YouTube streams"""
         chunk_duration = SPEECH_CONFIG['chunk_duration']
         consecutive_failures = 0
-        
+        logging.info(
+            "Audio capture loop started for %s (chunk=%ss)",
+            self.channel_name,
+            chunk_duration,
+        )
+
         while self.is_running:
             try:
                 # Keep YouTube/HLS playback URL fresh (same as video path)
@@ -531,10 +542,17 @@ class NewsMonitor:
                     if is_youtube_url(self.source_url)
                     else self.rtsp_url
                 )
+                logging.debug(
+                    "Audio pull target for %s: %s (%s)",
+                    self.channel_name,
+                    redact_stream_url(stream_url)[:160],
+                    stream_url_kind(stream_url),
+                )
 
                 audio_data = extract_audio_from_rtsp(
                     stream_url,
-                    duration=chunk_duration
+                    duration=chunk_duration,
+                    label=self.channel_name,
                 )
 
                 # Skip failed / empty / near-silence pulls (don't feed Whisper)
@@ -554,11 +572,22 @@ class NewsMonitor:
                 peak = float(np.max(np.abs(audio_data))) if len(audio_data) else 0.0
                 if peak < 1e-4:
                     consecutive_failures += 1
+                    if consecutive_failures <= 3 or consecutive_failures % 5 == 0:
+                        logging.warning(
+                            "Audio pull near-silence on %s (peak=%.2e) — skipping Whisper",
+                            self.channel_name,
+                            peak,
+                        )
                     time.sleep(min(15.0, 2.0 * consecutive_failures))
                     continue
 
                 consecutive_failures = 0
                 if self.speech_transcriber:
+                    logging.debug(
+                        "Queued %.2fs audio for transcription on %s",
+                        len(audio_data) / SPEECH_CONFIG['sample_rate'],
+                        self.channel_name,
+                    )
                     self.speech_transcriber.add_audio(audio_data)
                 
             except Exception as e:
@@ -937,6 +966,26 @@ class NewsMonitor:
 
         return changed
     
+    def _save_transcription_audio(
+        self, audio_data: np.ndarray, record_uuid: str
+    ) -> Optional[Path]:
+        """Persist the WAV chunk that produced a transcription."""
+        if audio_data is None or len(audio_data) == 0:
+            return None
+        try:
+            clips_dir = STORAGE_CONFIG['audio_clips_dir'] / 'transcriptions'
+            clips_dir.mkdir(parents=True, exist_ok=True)
+            filepath = clips_dir / f'{record_uuid}.wav'
+            if save_audio_chunk(
+                audio_data,
+                str(filepath),
+                sample_rate=SPEECH_CONFIG['sample_rate'],
+            ):
+                return filepath
+        except Exception as e:
+            logging.error("Error saving transcription audio clip: %s", e)
+        return None
+
     def _process_audio_transcriptions(self):
         """Process audio transcription results"""
         if not self.speech_transcriber:
@@ -955,19 +1004,22 @@ class NewsMonitor:
                     cleaned_text = clean_urdu_text(text)
                     
                     if cleaned_text and not self._is_duplicate_text(cleaned_text, 'audio'):
-                        # Save audio clip if high priority
+                        record_uuid = str(uuid.uuid4())
                         audio_path = None
-                        if any(keyword in cleaned_text.lower() for keyword in ALERTS_CONFIG['keywords']):
-                            # Would save audio clip here in production
-                            pass
-                        
+                        audio_data = transcription.get('audio_data')
+                        if audio_data is not None and len(audio_data) > 0:
+                            saved = self._save_transcription_audio(audio_data, record_uuid)
+                            if saved:
+                                audio_path = str(saved)
+
                         # Store in database
                         transcription_uuid = self.database.insert_audio_transcription(
                             text=cleaned_text,
                             confidence=confidence,
                             duration=duration,
                             audio_path=audio_path,
-                            channel_name=self.channel_name
+                            channel_name=self.channel_name,
+                            record_uuid=record_uuid,
                         )
                         
                         if transcription_uuid:

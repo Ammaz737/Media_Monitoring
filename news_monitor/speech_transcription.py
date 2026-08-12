@@ -413,7 +413,8 @@ class RealtimeSpeechTranscriber:
                             'confidence': confidence,
                             'timestamp': time.time(),
                             'processing_time': processing_time,
-                            'chunk_duration': len(chunk) / self.audio_buffer.sample_rate
+                            'chunk_duration': len(chunk) / self.audio_buffer.sample_rate,
+                            'audio_data': chunk.copy(),
                         }
                         self.transcription_queue.put(result)
                 
@@ -479,21 +480,33 @@ def save_audio_chunk(audio_data: np.ndarray,
         logging.error(f"Error saving audio chunk: {e}")
         return False
 
-def extract_audio_from_rtsp(rtsp_url: str, 
+def extract_audio_from_rtsp(rtsp_url: str,
                            duration: float = 30.0,
-                           sample_rate: int = 16000) -> Optional[np.ndarray]:
+                           sample_rate: int = 16000,
+                           label: str = "") -> Optional[np.ndarray]:
     """Extract audio from RTSP / HLS / HTTP stream using ffmpeg.
 
     Returns float32 mono PCM in [-1, 1], or None if capture failed / no audio.
     """
     import subprocess
-    
+    from stream_resolver import redact_stream_url, stream_url_kind
+
     process = None
+    tag = f"{label} " if label else ""
     try:
         url = (rtsp_url or '').strip()
         if not url:
+            logging.warning("%sAudio pull skipped — empty stream URL", tag)
             return None
         is_rtsp = url.lower().startswith('rtsp://')
+        logging.info(
+            "%sPulling audio (%s, %.1fs @ %s Hz) from %s",
+            tag,
+            stream_url_kind(url),
+            duration,
+            sample_rate,
+            redact_stream_url(url)[:160],
+        )
 
         command = ['ffmpeg', '-hide_banner', '-nostdin']
         if is_rtsp:
@@ -544,16 +557,24 @@ def extract_audio_from_rtsp(rtsp_url: str,
             return None
 
         if not audio_bytes:
+            logging.warning(
+                "%sAudio pull returned no data (rc=0) — stream may have no audio track",
+                tag,
+            )
             return None
-        
+
         audio_np = np.frombuffer(audio_bytes, dtype=np.int16)
         if audio_np.size == 0:
+            logging.warning("%sAudio pull decoded to 0 samples", tag)
             return None
 
         audio_float = audio_np.astype(np.float32) / 32768.0
+        peak = float(np.max(np.abs(audio_float)))
         logging.info(
-            "Extracted %.2fs of audio from stream",
+            "%sExtracted %.2fs of audio (peak=%.4f)",
+            tag,
             len(audio_float) / sample_rate,
+            peak,
         )
         return audio_float
         

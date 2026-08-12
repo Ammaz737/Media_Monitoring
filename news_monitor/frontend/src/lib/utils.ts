@@ -46,3 +46,14 @@ export function screenshotUrl(
   if (!filename) return null;
   return `/api/screenshots/${encodeURIComponent(filename)}`;
 }
+
+/** Build same-origin URL for a stored transcription WAV clip. */
+export function transcriptionAudioUrl(
+  path: string | null | undefined
+): string | null {
+  if (!path) return null;
+  const normalized = path.replace(/\\/g, "/");
+  const filename = normalized.split("/").pop();
+  if (!filename) return null;
+  return `/api/transcriptions/audio/${encodeURIComponent(filename)}`;
+}

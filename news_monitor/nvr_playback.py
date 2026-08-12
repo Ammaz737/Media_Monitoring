@@ -13,7 +13,7 @@ import subprocess
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 _CHANNELS_RE = re.compile(r"/Streaming/Channels/(\d+)", re.IGNORECASE)
@@ -22,6 +22,10 @@ _TRACKS_RE = re.compile(r"/Streaming/tracks?/(\d+)", re.IGNORECASE)
 # Pakistan Standard Time (UTC+5). NVR wall clock is typically set to local time;
 # Hikvision starttime/endtime should use that local clock, not UTC.
 PKT = timezone(timedelta(hours=5))
+
+# ponytail: NVR .144 clock skew vs on-air (TV 2026-08-11 00:00 ↔ NVR 21:16 Aug 10)
+_NVR_CLOCK_SKEW = timedelta(hours=2, minutes=44)
+_NVR_CLOCK_SKEW_HOST = "192.168.2.144"
 
 
 def _as_pakistan_local(dt: datetime) -> datetime:
@@ -64,6 +68,11 @@ def live_rtsp_to_playback_url(
             raise ValueError(
                 "URL must contain /Streaming/Channels/NNN or /Streaming/tracks/NNN"
             )
+
+    # Temporary: on-air/OCR time → NVR device time for 192.168.2.144
+    if (parts.hostname or "").lower() == _NVR_CLOCK_SKEW_HOST:
+        start = start - _NVR_CLOCK_SKEW
+        end = end - _NVR_CLOCK_SKEW
 
     query = dict(parse_qsl(parts.query, keep_blank_values=True))
     query["starttime"] = format_hikvision_time(start)
@@ -142,8 +151,17 @@ def extract_playback_audio_clip(
 
     Returns (ok, error_message).
     """
+    from stream_resolver import redact_stream_url
+
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    logging.info(
+        "Pulling NVR audio clip (%.1fs @ %s Hz) from %s → %s",
+        duration,
+        sample_rate,
+        redact_stream_url(playback_url)[:160],
+        output_path.name,
+    )
 
     # Remove stale file so we never serve a partial previous clip
     if output_path.exists():

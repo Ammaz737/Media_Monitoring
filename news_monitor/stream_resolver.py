@@ -50,6 +50,40 @@ def is_youtube_url(url: str) -> bool:
     return "youtube.com" in u or "youtu.be" in u or "youtube-nocookie.com" in u
 
 
+def redact_stream_url(url: str) -> str:
+    """Hide credentials in RTSP/HTTP URLs for safe logging."""
+    url = (url or "").strip()
+    if not url:
+        return ""
+    try:
+        p = urlparse(url)
+        if not (p.username or p.password):
+            return url
+        host = p.hostname or ""
+        if p.port:
+            host = f"{host}:{p.port}"
+        auth = f"{p.username}:****@" if p.password else f"{p.username}@"
+        return urlunparse((p.scheme, auth + host, p.path, p.params, p.query, p.fragment))
+    except Exception:
+        return url
+
+
+def stream_url_kind(url: str) -> str:
+    """Short label for logs: rtsp, hls, youtube, http, etc."""
+    u = (url or "").strip().lower()
+    if not u:
+        return "empty"
+    if u.startswith("rtsp://"):
+        return "rtsp"
+    if is_youtube_url(u):
+        return "youtube"
+    if ".m3u8" in u or "manifest/hls" in u:
+        return "hls"
+    if u.startswith("http://") or u.startswith("https://"):
+        return "http"
+    return "stream"
+
+
 def parse_youtube_preferred_height(url: str) -> Tuple[str, int]:
     """
     Read optional stream height from the watch URL query, then strip those keys.

@@ -175,6 +175,20 @@ def api_serve_screenshot(filename: str):
     return send_from_directory(shots_dir, safe_name)
 
 
+@app.route('/api/transcriptions/audio/<path:filename>')
+def api_serve_transcription_audio(filename: str):
+    """Serve WAV clips attached to live audio transcriptions."""
+    safe_name = Path(filename).name
+    if not safe_name or safe_name != filename.replace("\\", "/").split("/")[-1]:
+        abort(400)
+    audio_dir = (Path(STORAGE_CONFIG['audio_clips_dir']) / 'transcriptions').resolve()
+    target = (audio_dir / safe_name).resolve()
+    if not str(target).startswith(str(audio_dir)) or not target.is_file():
+        abort(404)
+    return send_file(target, mimetype='audio/wav', as_attachment=False,
+                     download_name=safe_name)
+
+
 refresh_rtsp_channels_cache()
 
 @app.route('/')

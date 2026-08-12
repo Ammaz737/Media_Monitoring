@@ -245,14 +245,15 @@ class NewsDatabase:
                                  duration: float,
                                  audio_path: str = None,
                                  language: str = 'urdu',
-                                 channel_name: str = 'unknown') -> str:
+                                 channel_name: str = 'unknown',
+                                 record_uuid: str = None) -> str:
         """
         Insert an audio transcription record
         
         Returns:
             UUID of the inserted record
         """
-        record_uuid = str(uuid.uuid4())
+        record_uuid = record_uuid or str(uuid.uuid4())
         timestamp = datetime.now()
         
         with self.lock:
@@ -429,22 +430,34 @@ class NewsDatabase:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             
-            sql = "SELECT * FROM alerts WHERE 1=1"
+            sql = """
+                SELECT a.*,
+                       te.screenshot_path,
+                       at.audio_path
+                FROM alerts a
+                LEFT JOIN text_extractions te
+                    ON a.content_id = te.uuid
+                   AND a.content_type = 'text'
+                LEFT JOIN audio_transcriptions at
+                    ON a.content_id = at.uuid
+                   AND a.content_type = 'audio'
+                WHERE 1=1
+            """
             params = []
             
             if is_read is not None:
-                sql += " AND is_read = ?"
+                sql += " AND a.is_read = ?"
                 params.append(is_read)
             
             if alert_type:
-                sql += " AND alert_type = ?"
+                sql += " AND a.alert_type = ?"
                 params.append(alert_type)
             
             if severity:
-                sql += " AND severity = ?"
+                sql += " AND a.severity = ?"
                 params.append(severity)
             
-            sql += " ORDER BY timestamp DESC LIMIT ?"
+            sql += " ORDER BY a.timestamp DESC LIMIT ?"
             params.append(max(1, min(int(limit or 1000), 5000)))
             
             cursor.execute(sql, params)

@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import {
   AlertTriangle,
   Bell,
@@ -14,14 +14,14 @@ import {
 import { Dialog, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import type { Alert } from "@/lib/types";
-import { cn, formatTimestamp, hasArabicScript, parseKeywords } from "@/lib/utils";
-
-function severityConfidence(severity: string): number {
-  const s = severity?.toLowerCase();
-  if (s === "high") return 92;
-  if (s === "low") return 55;
-  return 72;
-}
+import {
+  cn,
+  formatTimestamp,
+  hasArabicScript,
+  parseKeywords,
+  screenshotUrl,
+  transcriptionAudioUrl,
+} from "@/lib/utils";
 
 function severityStyles(severity: string) {
   const s = severity?.toLowerCase() ?? "medium";
@@ -82,21 +82,27 @@ export function AlertViewModal({
   onOpenChange,
   onMarkRead,
 }: AlertViewModalProps) {
+  const [imgFailed, setImgFailed] = useState(false);
+
   if (!item) return null;
 
   const keywords = parseKeywords(item.matched_keywords);
   const isUnread = !item.is_read;
-  const confidence = severityConfidence(item.severity);
   const styles = severityStyles(item.severity);
   const isAudio =
     item.content_type?.toLowerCase().includes("audio") ||
     item.content_type?.toLowerCase().includes("transcription");
   const urdu = hasArabicScript(item.alert_text);
+  const shotUrl = screenshotUrl(item.screenshot_path);
+  const audioUrl = transcriptionAudioUrl(item.audio_path);
 
   return (
     <Dialog
       open={open}
-      onOpenChange={onOpenChange}
+      onOpenChange={(next) => {
+        onOpenChange(next);
+        if (next) setImgFailed(false);
+      }}
       className="max-w-[560px] p-0"
     >
       <div className="overflow-hidden rounded-2xl">
@@ -175,6 +181,43 @@ export function AlertViewModal({
 
           <section>
             <p className="mb-1.5 text-[0.65rem] font-semibold uppercase tracking-wider text-[#64748B]">
+              {isAudio ? "Audio clip" : "Screenshot"}
+            </p>
+            {isAudio ? (
+              audioUrl ? (
+                <div className="overflow-hidden rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] p-3">
+                  {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+                  <audio
+                    controls
+                    preload="metadata"
+                    src={audioUrl}
+                    className="h-10 w-full"
+                  />
+                </div>
+              ) : (
+                <p className="rounded-xl border border-dashed border-[#E2E8F0] bg-[#F8FAFC] px-3 py-4 text-center text-[0.85rem] text-[#94A3B8]">
+                  No audio clip saved for this alert
+                </p>
+              )
+            ) : shotUrl && !imgFailed ? (
+              <div className="overflow-hidden rounded-xl border border-[#E2E8F0] bg-[#0F172A]">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={shotUrl}
+                  alt="Alert source screenshot"
+                  className="max-h-[240px] w-full object-contain"
+                  onError={() => setImgFailed(true)}
+                />
+              </div>
+            ) : (
+              <p className="rounded-xl border border-dashed border-[#E2E8F0] bg-[#F8FAFC] px-3 py-4 text-center text-[0.85rem] text-[#94A3B8]">
+                No screenshot available for this alert
+              </p>
+            )}
+          </section>
+
+          <section>
+            <p className="mb-1.5 text-[0.65rem] font-semibold uppercase tracking-wider text-[#64748B]">
               Alert message
             </p>
             <div
@@ -198,7 +241,7 @@ export function AlertViewModal({
             </div>
           </section>
 
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4" dir="ltr">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3" dir="ltr">
             <MetaTile
               label="Channel"
               value={item.channel_name || "unknown"}
@@ -220,31 +263,6 @@ export function AlertViewModal({
                 )
               }
             />
-            <MetaTile
-              label="Type"
-              value={item.alert_type?.replace(/_/g, " ") || "keyword"}
-              icon={<Shield className="h-3 w-3" />}
-            />
-          </div>
-
-          <div
-            className="flex items-center gap-4 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2.5"
-            dir="ltr"
-          >
-            <div className="min-w-0 flex-1">
-              <p className="text-[0.65rem] font-semibold uppercase tracking-wider text-[#64748B]">
-                Match strength
-              </p>
-              <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-[#E2E8F0]">
-                <div
-                  className={cn("h-full rounded-full transition-all", styles.bar)}
-                  style={{ width: `${confidence}%` }}
-                />
-              </div>
-            </div>
-            <p className="shrink-0 text-2xl font-bold tabular-nums text-[#1E40AF]">
-              {confidence.toFixed(0)}%
-            </p>
           </div>
         </div>
       </div>

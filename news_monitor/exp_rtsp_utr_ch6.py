@@ -1,26 +1,32 @@
 """
-Ch6 RTSP → auto-find ticker → OCR every fit crop.
+Ch6/7 NVR playtrack (default) → auto-find ticker → OCR every fit crop.
 Skip: blur/interlace, exact same text. Scroll dedupe off unless --scroll-thr > 0.
-Saves to data/exp_ch6_crops.
 
   ..\\venv_opencv5\\Scripts\\python.exe exp_rtsp_utr_ch6.py --show
+  ..\\venv_opencv5\\Scripts\\python.exe exp_rtsp_utr_ch6.py --channel channel_6 --start 2026-08-11T00:00 --duration 60
+  ..\\venv_opencv5\\Scripts\\python.exe exp_rtsp_utr_ch6.py --channel channel_6 --db-regions --show
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sqlite3
 import sys
 import threading
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import cv2
 import numpy as np
 
+from nvr_playback import live_rtsp_to_playback_url
+
 HERE = Path(__file__).resolve().parent
 DB_PATH = HERE / "data" / "news_monitor.db"
+PLAYTRACK_CHANNELS = frozenset({"channel_6", "channel_7"})
 FALLBACK_URLS = {
     "channel_6": "rtsp://admin:Admin123.@192.168.2.144:554/Streaming/Channels/901",
     "channel_7": "rtsp://admin:Admin123.@192.168.2.144:554/Streaming/Channels/1001",
@@ -38,6 +44,36 @@ def load_url(channel_id: str = "channel_6"):
     if row and row[0]:
         return row[0]
     return FALLBACK_URLS.get(channel_id, FALLBACK_URLS["channel_6"])
+
+
+def load_region_frac(channel_id: str, key: str = "ticker"):
+    """Fractional (x1,y1,x2,y2) from channels.text_regions, or None."""
+    if not DB_PATH.exists():
+        return None
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT text_regions FROM channels WHERE channel_name = ?",
+            (channel_id,),
+        ).fetchone()
+    if not row or not row[0]:
+        return None
+    try:
+        regions = json.loads(row[0])
+        box = regions[key]["region"]
+        return tuple(float(v) for v in box)
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
+
+
+def frac_to_box(frame, frac: tuple[float, float, float, float]):
+    h, w = frame.shape[:2]
+    x1, y1, x2, y2 = frac
+    return (
+        int(x1 * w),
+        int(y1 * h),
+        int(x2 * w),
+        int(y2 * h),
+    )
 
 
 def opencv5_filter(crop):
@@ -304,9 +340,11 @@ def crop_ok(
 
 
 class AlwaysLatest:
-    def __init__(self, url):
+    def __init__(self, url, reopen: bool = True):
         os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
         self.url = url
+        self.reopen = reopen
+        self.ended = False
         self.cap = self._open()
         self._lock = threading.Lock()
         self._frame = None
@@ -322,6 +360,12 @@ class AlwaysLatest:
         return cap
 
     def _reopen(self):
+        if not self.reopen:
+            with self._lock:
+                self._frame = None
+                self.ended = True
+            self._stop.set()
+            return
         try:
             self.cap.release()
         except Exception:
@@ -363,6 +407,8 @@ class AlwaysLatest:
             with self._lock:
                 if self._frame is not None:
                     return self._frame.copy(), self._n
+            if self.ended:
+                break
             time.sleep(0.01)
         return None, self._n
 
@@ -423,9 +469,56 @@ def main():
         default="channel_7",
         help="DB channel id (channel_6, channel_7, ...)",
     )
+    ap.add_argument(
+        "--start",
+        default=None,
+        help="Playtrack start ISO (channel_6/7). Default: now - duration.",
+    )
+    ap.add_argument(
+        "--duration",
+        type=float,
+        default=60.0,
+        help="Playtrack window seconds for channel_6/7 (default 60)",
+    )
+    ap.add_argument(
+        "--live",
+        action="store_true",
+        help="Force live RTSP even for channel_6/7",
+    )
+    ap.add_argument(
+        "--db-regions",
+        action="store_true",
+        help="Use channels.text_regions from DB instead of auto band find",
+    )
+    ap.add_argument(
+        "--region",
+        default="ticker",
+        help="DB text_regions key when --db-regions (default: ticker)",
+    )
     args = ap.parse_args()
 
-    url = load_url(args.channel)
+    live_url = load_url(args.channel)
+    db_frac = None
+    if args.db_regions:
+        db_frac = load_region_frac(args.channel, args.region)
+        if db_frac is None:
+            raise SystemExit(
+                f"no text_regions.{args.region} in DB for {args.channel}"
+            )
+    use_playtrack = args.channel in PLAYTRACK_CHANNELS and not args.live
+    if use_playtrack:
+        if args.start:
+            start_dt = datetime.fromisoformat(args.start.replace("Z", "+00:00"))
+            if start_dt.tzinfo is not None:
+                start_dt = start_dt.replace(tzinfo=None)
+        else:
+            start_dt = datetime.now() - timedelta(seconds=args.duration)
+        end_dt = start_dt + timedelta(seconds=max(1.0, float(args.duration)))
+        url = live_rtsp_to_playback_url(live_url, start_dt, end_dt)
+    else:
+        url = live_url
+        start_dt = end_dt = None
+
     if args.no_save:
         save_dir = None
     elif args.save_dir is not None:
@@ -437,6 +530,15 @@ def main():
         f"min_ocr={args.min_ocr_interval}s  change>={args.change}  "
         f"sharp>={args.sharp}  conf>={args.min_conf}"
     )
+    if db_frac is not None:
+        print(f"band=db:{args.region} frac={db_frac}")
+    else:
+        print("band=auto")
+    if use_playtrack:
+        print(
+            f"playtrack {start_dt.isoformat(timespec='seconds')} → "
+            f"{end_dt.isoformat(timespec='seconds')} ({args.duration:.0f}s)"
+        )
     print(f"url={url}")
     print(f"save_dir={save_dir or '(off)'}  colorbar={not (args.no_colorbar or args.no_magenta)}")
 
@@ -450,7 +552,7 @@ def main():
     if save_dir:
         save_dir.mkdir(parents=True, exist_ok=True)
 
-    stream = AlwaysLatest(url)
+    stream = AlwaysLatest(url, reopen=not use_playtrack)
     last_crop = None
     last_ocr_crop = None
     last_box = None
@@ -476,30 +578,43 @@ def main():
             time.sleep(args.poll)
             frame, drained = stream.latest()
             if frame is None:
+                if stream.ended:
+                    print("playtrack ended", flush=True)
+                    break
                 continue
 
             t0 = time.perf_counter()
-            box = find_ticker_band(frame, search_top=args.search_top, prev=last_box)
-            if box is None:
-                skips["noband"] += 1
-                if args.show:
-                    vis = frame.copy()
-                    cv2.putText(
-                        vis, "no band", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2
-                    )
-                    cv2.imshow("frame", cv2.resize(vis, (960, 540)))
-                    if cv2.waitKey(1) & 0xFF == ord("q"):
-                        break
-                continue
+            if db_frac is not None:
+                box = frac_to_box(frame, db_frac)
+                x1, y1, x2, y2 = box
+                if x2 <= x1 or y2 <= y1:
+                    skips["noband"] += 1
+                    continue
+                last_box = box
+                raw = frame[y1:y2, x1:x2].copy()
+            else:
+                box = find_ticker_band(frame, search_top=args.search_top, prev=last_box)
+                if box is None:
+                    skips["noband"] += 1
+                    if args.show:
+                        vis = frame.copy()
+                        cv2.putText(
+                            vis, "no band", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2
+                        )
+                        cv2.imshow("frame", cv2.resize(vis, (960, 540)))
+                        if cv2.waitKey(1) & 0xFF == ord("q"):
+                            break
+                    continue
 
-            x1, y1, x2, y2 = box
-            last_box = box
-            # Extra vertical pad so Urdu nuqtas / descenders not clipped
-            vpad = 12
-            ya = max(0, y1 - vpad)
-            yb = min(frame.shape[0], y2 + vpad)
-            raw = frame[ya:yb, x1:x2].copy()
-            y1, y2 = ya, yb
+                x1, y1, x2, y2 = box
+                last_box = box
+                # Extra vertical pad so Urdu nuqtas / descenders not clipped
+                # ponytail: skip pad for DB boxes — Settings already drawn exact
+                vpad = 12
+                ya = max(0, y1 - vpad)
+                yb = min(frame.shape[0], y2 + vpad)
+                raw = frame[ya:yb, x1:x2].copy()
+                y1, y2 = ya, yb
             mx_off = 0
             use_bar = not (args.no_colorbar or args.no_magenta)
             if use_bar:
