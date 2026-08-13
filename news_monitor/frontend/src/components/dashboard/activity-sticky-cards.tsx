@@ -1,11 +1,13 @@
 "use client";
 
-import { useState } from "react";
-import { Eye } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Eye, Loader2, Video } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Dialog, DialogFooter } from "@/components/ui/dialog";
 import { AlertViewModal } from "@/components/alerts/alert-view-modal";
+import { isYoutubeStreamUrl } from "@/components/settings/region-editor-dialog";
+import { api, getTrackStreamUrl } from "@/lib/api";
 import type { Alert, AudioTranscription, TextExtraction } from "@/lib/types";
 import {
   cn,
@@ -15,6 +17,16 @@ import {
   screenshotUrl,
   transcriptionAudioUrl,
 } from "@/lib/utils";
+
+/** Local datetime-local string (Pakistan wall clock as browser local). */
+function toDatetimeLocal(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function parseEventDate(ts: string): Date {
+  return new Date(ts.includes("T") ? ts : ts.replace(" ", "T"));
+}
 
 function ViewFullButton({ onClick }: { onClick: () => void }) {
   return (
@@ -225,8 +237,74 @@ export function ExtractionStickyCard({ item }: { item: TextExtraction }) {
 
 export function TranscriptionStickyCard({ item }: { item: AudioTranscription }) {
   const [open, setOpen] = useState(false);
+  const [nvrChannelId, setNvrChannelId] = useState<string | null>(null);
+  const [streamUrl, setStreamUrl] = useState<string | null>(null);
+  const [streamLoading, setStreamLoading] = useState(false);
+  const [streamError, setStreamError] = useState<string | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const confidencePct = item.confidence * 100;
   const audioUrl = transcriptionAudioUrl(item.audio_path);
+  const clipDuration = Math.min(300, Math.max(1, Math.round(item.duration) || 30));
+
+  const tearDownStream = () => {
+    if (videoRef.current) {
+      videoRef.current.pause();
+      videoRef.current.removeAttribute("src");
+      videoRef.current.load();
+    }
+    setStreamUrl(null);
+    setStreamLoading(false);
+    setStreamError(null);
+  };
+
+  useEffect(() => {
+    if (!open) {
+      tearDownStream();
+      setNvrChannelId(null);
+      return;
+    }
+    let cancelled = false;
+    api
+      .getConfig()
+      .then((cfg) => {
+        if (cancelled) return;
+        const match = Object.entries(cfg.rtsp_channels).find(
+          ([, ch]) => ch.name === item.channel_name
+        );
+        if (!match || isYoutubeStreamUrl(match[1].rtsp_url)) {
+          setNvrChannelId(null);
+          return;
+        }
+        setNvrChannelId(match[0]);
+      })
+      .catch(() => {
+        if (!cancelled) setNvrChannelId(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- tearDown only on close
+  }, [open, item.channel_name]);
+
+  const playNvrTrack = () => {
+    if (!nvrChannelId) return;
+    const start = toDatetimeLocal(
+      new Date(parseEventDate(item.timestamp).getTime() - 6000)
+    );
+    setStreamError(null);
+    setStreamLoading(true);
+    const url = getTrackStreamUrl({
+      channel_id: nvrChannelId,
+      start,
+      duration: clipDuration,
+    });
+    setStreamUrl(`${url}&_=${Date.now()}`);
+  };
+
+  const handleOpenChange = (next: boolean) => {
+    if (!next) tearDownStream();
+    setOpen(next);
+  };
 
   return (
     <>
@@ -259,7 +337,7 @@ export function TranscriptionStickyCard({ item }: { item: AudioTranscription }) 
         </span>
       </ActivityCardShell>
 
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog open={open} onOpenChange={handleOpenChange} className="max-w-2xl">
         <div className="pe-8">
           <p className="mb-2 text-sm text-slate-500" dir="ltr">
             {item.duration.toFixed(1)}s · {item.channel_name}
@@ -282,11 +360,75 @@ export function TranscriptionStickyCard({ item }: { item: AudioTranscription }) 
               No audio clip saved for this transcription
             </p>
           )}
+
           <ModalUrduBlock text={item.transcribed_text} />
-          <Progress value={confidencePct} barClassName="mt-4 bg-[#059669]" />
+          
+          {nvrChannelId && (
+            <div className="mt-4 space-y-2" dir="ltr">
+              {!streamUrl ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8 text-xs"
+                  onClick={playNvrTrack}
+                >
+                  <Video className="h-3.5 w-3.5" />
+                  Play NVR stream ({clipDuration}s)
+                </Button>
+              ) : (
+                <>
+                  <div className="overflow-hidden rounded-xl border border-slate-200 bg-black">
+                    {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+                    <video
+                      ref={videoRef}
+                      key={streamUrl}
+                      className="aspect-video w-full bg-black"
+                      controls
+                      autoPlay
+                      playsInline
+                      src={streamUrl}
+                      onPlaying={() => setStreamLoading(false)}
+                      onWaiting={() => setStreamLoading(true)}
+                      onError={() => {
+                        setStreamLoading(false);
+                        setStreamError(
+                          "Could not play NVR track. Check recording exists for this time."
+                        );
+                      }}
+                      onEnded={() => setStreamLoading(false)}
+                    />
+                  </div>
+                  {streamLoading && (
+                    <p className="flex items-center gap-2 text-xs text-slate-500">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      Connecting to NVR track…
+                    </p>
+                  )}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-8 text-xs"
+                    onClick={playNvrTrack}
+                    disabled={streamLoading}
+                  >
+                    <Video className="h-3.5 w-3.5" />
+                    Replay stream
+                  </Button>
+                </>
+              )}
+              {streamError && (
+                <p className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                  {streamError}
+                </p>
+              )}
+            </div>
+          )}
+
         </div>
         <DialogFooter>
-          <Button onClick={() => setOpen(false)}>Close</Button>
+          <Button onClick={() => handleOpenChange(false)}>Close</Button>
         </DialogFooter>
       </Dialog>
     </>
