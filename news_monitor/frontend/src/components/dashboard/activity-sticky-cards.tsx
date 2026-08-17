@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Dialog, DialogFooter } from "@/components/ui/dialog";
 import { AlertViewModal } from "@/components/alerts/alert-view-modal";
-import { isYoutubeStreamUrl } from "@/components/settings/region-editor-dialog";
+import { isYoutubeStreamUrl, isAudioStreamUrl } from "@/components/settings/region-editor-dialog";
 import { api, getTrackStreamUrl } from "@/lib/api";
 import type { Alert, AudioTranscription, TextExtraction } from "@/lib/types";
 import {
@@ -271,7 +271,7 @@ export function TranscriptionStickyCard({ item }: { item: AudioTranscription }) 
         const match = Object.entries(cfg.rtsp_channels).find(
           ([, ch]) => ch.name === item.channel_name
         );
-        if (!match || isYoutubeStreamUrl(match[1].rtsp_url)) {
+        if (!match || isYoutubeStreamUrl(match[1].rtsp_url) || isAudioStreamUrl(match[1].rtsp_url)) {
           setNvrChannelId(null);
           return;
         }

@@ -250,8 +250,7 @@ export function SettingsPanel() {
           <p className="mb-4 text-sm text-slate-500">
             Default layout used when a channel has no custom boxes. Use{" "}
             <span className="font-medium text-slate-700">Edit OCR regions</span>{" "}
-            on each RTSP channel to draw ticker / headline / side over a live
-            frame.
+            on a live frame. FM audio channels skip OCR.
           </p>
           <div className="space-y-3">
             {Object.entries(config.text_regions).map(([key, r]) => (

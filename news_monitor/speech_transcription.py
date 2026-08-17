@@ -44,7 +44,8 @@ class SpeechTranscriber:
         self.model = None
         self.processor = None
         self.sample_rate = SPEECH_CONFIG['sample_rate']
-        
+        self._infer_lock = threading.Lock()
+
         self._load_model()
         logging.info(f"Speech transcriber initialized with {self.model_name} on {self.device}")
     
@@ -241,18 +242,15 @@ class SpeechTranscriber:
         """
         if len(audio_data) == 0:
             return "", 0.0
-        
-        # Preprocess audio
+
         processed_audio = self.preprocess_audio(audio_data, original_sr)
-        
-        # Transcribe based on model type
-        if self.model_type == 'whisper':
-            return self.transcribe_whisper(processed_audio)
-        elif self.model_type == 'wav2vec2':
-            return self.transcribe_wav2vec2(processed_audio)
-        else:
-            logging.error(f"Unknown model type: {self.model_type}")
-            return "", 0.0
+        with self._infer_lock:
+            if self.model_type == 'whisper':
+                return self.transcribe_whisper(processed_audio)
+            if self.model_type == 'wav2vec2':
+                return self.transcribe_wav2vec2(processed_audio)
+        logging.error(f"Unknown model type: {self.model_type}")
+        return "", 0.0
     
     def transcribe_file(self, audio_path: str) -> Tuple[str, float]:
         """
@@ -349,6 +347,30 @@ class AudioBuffer:
             self._buffer_time_origin = None
 
 
+class SharedSpeechService:
+    """One Whisper instance shared across channel monitors."""
+
+    def __init__(self):
+        self._model: Optional[SpeechTranscriber] = None
+        self._lock = threading.Lock()
+
+    def ensure_loaded(self) -> SpeechTranscriber:
+        if self._model is not None:
+            return self._model
+        with self._lock:
+            if self._model is not None:
+                return self._model
+            self._model = SpeechTranscriber()
+            logging.info("Shared Whisper model initialized")
+            return self._model
+
+    def cleanup(self):
+        with self._lock:
+            if self._model is not None:
+                self._model.cleanup()
+                self._model = None
+
+
 class RealtimeSpeechTranscriber:
     """
     Real-time speech transcription manager
@@ -356,6 +378,7 @@ class RealtimeSpeechTranscriber:
     """
     
     def __init__(self, transcriber: SpeechTranscriber = None):
+        self._owns_model = transcriber is None
         self.transcriber = transcriber or SpeechTranscriber()
         self.audio_buffer = AudioBuffer(
             chunk_duration=SPEECH_CONFIG['chunk_duration'],
@@ -469,7 +492,8 @@ class RealtimeSpeechTranscriber:
         """Clean up resources"""
         self.stop()
         self.audio_buffer.clear()
-        self.transcriber.cleanup()
+        if self._owns_model:
+            self.transcriber.cleanup()
 
 
 # Utility functions

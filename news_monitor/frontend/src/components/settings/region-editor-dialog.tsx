@@ -158,6 +158,15 @@ export function isYoutubeStreamUrl(url?: string | null): boolean {
   );
 }
 
+/** HTTP(S) Icecast/FM audio — not RTSP and not YouTube. */
+export function isAudioStreamUrl(url?: string | null): boolean {
+  const u = (url || "").trim().toLowerCase();
+  if (!u.startsWith("http://") && !u.startsWith("https://")) return false;
+  if (isYoutubeStreamUrl(u)) return false;
+  if (u.includes(".m3u8") || u.includes("manifest/hls")) return false;
+  return true;
+}
+
 function ensureRegionMap(
   input: TextRegionMap | null | undefined,
   defaults: TextRegionMap

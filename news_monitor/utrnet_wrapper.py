@@ -350,6 +350,7 @@ class UTRNetPredictor:
                     'region_min_confidence': float(
                         region_config.get('min_confidence', 0.5)
                     ),
+                    'det_conf': region_config.get('det_conf'),
                     # Same pixels UTRNet saw — reuse for Ollama / screenshots
                     'ocr_image': ocr_input,
                     'ocr_preprocess': preprocess_mode,

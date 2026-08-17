@@ -30,12 +30,18 @@ from utrnet_wrapper import (
     is_plausible_urdu_text,
 )
 from ollama_ocr import OllamaVisionOcr, SharedOllamaOcrService
-from speech_transcription import RealtimeSpeechTranscriber, extract_audio_from_rtsp, save_audio_chunk
+from speech_transcription import (
+    RealtimeSpeechTranscriber,
+    SharedSpeechService,
+    extract_audio_from_rtsp,
+    save_audio_chunk,
+)
 from database import NewsDatabase
 from alert_system import AlertSystem
 from stream_resolver import (
     resolve_stream_url,
     is_youtube_url,
+    is_audio_stream_url,
     ffmpeg_available,
     FfmpegFrameReader,
     redact_stream_url,
@@ -56,6 +62,7 @@ class NewsMonitor:
         text_regions: Dict = None,
         shared_ocr: Optional[SharedOcrService] = None,
         shared_ollama: Optional[SharedOllamaOcrService] = None,
+        shared_speech: Optional[SharedSpeechService] = None,
     ):
         self.source_url = (rtsp_url or RTSP_URL).strip()
         self.rtsp_url = self.source_url
@@ -65,7 +72,9 @@ class NewsMonitor:
         self.custom_text_regions = text_regions if isinstance(text_regions, dict) else None
         self.shared_ocr = shared_ocr
         self.shared_ollama = shared_ollama
+        self.shared_speech = shared_speech
         self._owns_utr_predictor = shared_ocr is None
+        self.audio_only = is_audio_stream_url(self.source_url)
 
         self.utr_predictor = None
         self.ollama_ocr: Optional[OllamaVisionOcr] = None
@@ -175,7 +184,8 @@ class NewsMonitor:
                 logging.info("Speech transcription disabled - Whisper not available")
                 return False
             logging.info("Loading Whisper model for %s…", self.channel_name)
-            self.speech_transcriber = RealtimeSpeechTranscriber()
+            model = self.shared_speech.ensure_loaded() if self.shared_speech else None
+            self.speech_transcriber = RealtimeSpeechTranscriber(transcriber=model)
             self.speech_transcriber.start()
             logging.info("Speech transcription initialized for %s", self.channel_name)
             return True
@@ -227,6 +237,31 @@ class NewsMonitor:
 
             self.is_running = True
             self.stats['start_time'] = datetime.now()
+
+            if self.audio_only:
+                self.stream_error = "Starting audio capture…"
+                logging.info("Audio-only channel %s — skipping video/OCR", self.channel_name)
+
+                def _boot_audio():
+                    try:
+                        self.processing_thread = threading.Thread(
+                            target=self._processing_loop, daemon=True, name="audio-processing"
+                        )
+                        self.processing_thread.start()
+                        if self.speech_enabled:
+                            self.start_speech_transcription()
+                        self.stream_error = None
+                        logging.info("Audio processing started for %s", self.channel_name)
+                    except Exception as e:
+                        logging.error("Failed to start audio processing: %s", e)
+                        self.stream_error = str(e)
+
+                threading.Thread(
+                    target=_boot_audio, daemon=True, name="audio-boot"
+                ).start()
+                logging.info("News monitoring started (audio-only)")
+                return
+
             self.stream_error = "Starting video capture…"
 
             # Video thread first so queue fills while OCR models load (CPU can take 1–2 min)
@@ -614,6 +649,12 @@ class NewsMonitor:
         
         while self.is_running:
             try:
+                if self.audio_only:
+                    if self.speech_transcriber:
+                        self._process_audio_transcriptions()
+                    time.sleep(0.1)
+                    continue
+
                 if self.utr_predictor is None:
                     time.sleep(0.5)
                     continue
@@ -665,11 +706,11 @@ class NewsMonitor:
         confidence = utr_conf
         source = "utrnet"
 
-        # Mid band (80% ≤ conf < 98%) → Ollama vision refine; only keep high-conf replies
-        if ollama is not None and ollama.utrnet_needs_ollama(utr_conf):
+        # Mid band, or high-conf text with digits → Ollama refine; only keep high-conf replies
+        if ollama is not None and ollama.utrnet_needs_ollama(utr_conf, raw_text):
             if ocr_crop is None or getattr(ocr_crop, "size", 0) == 0:
                 logging.info(
-                    "Ollama skip (%s/%s): mid-conf utr=%.3f but no crop image",
+                    "Ollama skip (%s/%s): utr=%.3f but no crop image",
                     source_label,
                     region_name,
                     utr_conf,
@@ -694,9 +735,10 @@ class NewsMonitor:
                 )
                 return
             logging.info(
-                "Ollama refine start (%s/%s): utr=%.3f draft=%s…",
+                "Ollama refine start (%s/%s %s): utr=%.3f draft=%s…",
                 source_label,
                 region_name,
+                "digits" if ollama.utrnet_is_high(utr_conf) else "mid-conf",
                 utr_conf,
                 raw_text[:40],
             )
@@ -765,7 +807,13 @@ class NewsMonitor:
         # Full frame → screenshots/ for every region (ticker, side_text, …)
         screenshot_path = None
         if full_frame is not None:
-            screenshot_path = self._save_screenshot(full_frame, timestamp, region_name)
+            screenshot_path = self._save_screenshot(
+                full_frame,
+                timestamp,
+                region_name,
+                box=result.get("region"),
+                det_conf=result.get("det_conf"),
+            )
 
         extraction_uuid = self.database.insert_text_extraction(
             region_name=region_name,
@@ -1103,13 +1151,33 @@ class NewsMonitor:
         return False
     
     def _save_screenshot(
-        self, frame: np.ndarray, timestamp: datetime, region_name: str
+        self,
+        frame: np.ndarray,
+        timestamp: datetime,
+        region_name: str,
+        box=None,
+        det_conf=None,
     ) -> Optional[Path]:
         """Save full-frame screenshot (region crops belong in ocr_crops/)."""
         try:
+            vis = frame
+            if box is not None and len(box) == 4:
+                x1, y1, x2, y2 = (int(v) for v in box)
+                if x2 > x1 and y2 > y1:
+                    vis = frame.copy()
+                    color = (0, 255, 0)
+                    cv2.rectangle(vis, (x1, y1), (x2, y2), color, 1, cv2.LINE_AA)
+                    if det_conf:
+                        caption = f"{float(det_conf):.2f}"
+                        font, scale, thick = cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1
+                        (_tw, th), _ = cv2.getTextSize(caption, font, scale, thick)
+                        ly = y1 - 4 if y1 > th + 8 else y1 + th + 4
+                        cv2.putText(
+                            vis, caption, (x1 + 2, ly), font, scale, color, thick, cv2.LINE_AA
+                        )
             filename = f"{timestamp.strftime('%Y%m%d_%H%M%S')}_{region_name}_{self.channel_name}.jpg"
             filepath = STORAGE_CONFIG['screenshots_dir'] / filename
-            cv2.imwrite(str(filepath), frame)
+            cv2.imwrite(str(filepath), vis)
             return filepath
         except Exception as e:
             logging.error(f"Error saving screenshot: {e}")
@@ -1283,6 +1351,7 @@ class MultiChannelNewsMonitor:
         self.alert_system = AlertSystem(self.database)
         self.shared_ocr = SharedOcrService()
         self.shared_ollama = SharedOllamaOcrService()
+        self.shared_speech = SharedSpeechService()
         # Channel id that owns the shared Whisper / audio-capture thread
         self._speech_channel_id: Optional[str] = None
 
@@ -1303,6 +1372,7 @@ class MultiChannelNewsMonitor:
             text_regions=config.get("text_regions"),
             shared_ocr=self.shared_ocr,
             shared_ollama=self.shared_ollama,
+            shared_speech=self.shared_speech,
         )
 
     def _initialize_monitors(self):
@@ -1320,18 +1390,27 @@ class MultiChannelNewsMonitor:
 
     def _wait_for_processing_ready(self, monitor: "NewsMonitor", timeout: float = 120.0) -> bool:
         """Block until shared OCR is attached and the channel processing thread is running."""
-        deadline = time.time() + timeout
+        deadline = time.time() + (15.0 if monitor.audio_only else timeout)
         while self.is_running and time.time() < deadline:
             proc = monitor.processing_thread
-            if monitor.utr_predictor is not None and proc is not None and proc.is_alive():
+            if monitor.audio_only:
+                if monitor.is_running and proc is not None and proc.is_alive():
+                    return True
+            elif monitor.utr_predictor is not None and proc is not None and proc.is_alive():
                 return True
             err = (monitor.stream_error or "").lower()
             if err and not err.startswith("loading ocr") and not err.startswith("starting"):
                 if any(k in err for k in ("failed", "error", "cuda", "out of memory", "oom")):
                     return False
-            if not monitor.is_running and monitor.utr_predictor is None:
+            if not monitor.is_running and monitor.utr_predictor is None and not monitor.audio_only:
                 return False
             time.sleep(0.5)
+        if monitor.audio_only:
+            return bool(
+                monitor.is_running
+                and monitor.processing_thread is not None
+                and monitor.processing_thread.is_alive()
+            )
         return (
             monitor.utr_predictor is not None
             and monitor.processing_thread is not None
@@ -1350,10 +1429,14 @@ class MultiChannelNewsMonitor:
             started = 0
             first_ready: Optional["NewsMonitor"] = None
             try:
-                logging.info("Loading shared UTRNet for all channels…")
-                self.shared_ocr.ensure_loaded()
-                if OLLAMA_OCR_CONFIG.get("enabled", True):
-                    self.shared_ollama.ensure_loaded()
+                needs_ocr = any(not m.audio_only for m in self.monitors.values())
+                if needs_ocr:
+                    logging.info("Loading shared UTRNet for all channels…")
+                    self.shared_ocr.ensure_loaded()
+                    if OLLAMA_OCR_CONFIG.get("enabled", True):
+                        self.shared_ollama.ensure_loaded()
+                else:
+                    logging.info("Audio-only channels — skipping OCR load")
             except Exception as e:
                 logging.error("Shared OCR failed to load: %s", e)
                 self.is_running = False
@@ -1416,6 +1499,7 @@ class MultiChannelNewsMonitor:
                 logging.error(f"Error stopping monitor for {channel_id}: {e}")
 
         self.shared_ocr.cleanup()
+        self.shared_speech.cleanup()
 
         logging.info("Multi-channel monitoring stopped")
 
@@ -1552,18 +1636,40 @@ class MultiChannelNewsMonitor:
         return bool(thread and thread.is_alive() and mon.speech_transcriber)
 
     def _ensure_speech(self, preferred: Optional["NewsMonitor"] = None) -> bool:
-        """Start (or fail over) shared speech on one running channel."""
+        """Start speech on every audio-only channel, plus one TV channel."""
         if not SPEECH_CONFIG.get('enabled', True):
             return False
+
+        started_any = False
+        for mon in self.monitors.values():
+            if not mon.is_running or not mon.audio_only:
+                continue
+            thread = getattr(mon, 'audio_thread', None)
+            if thread and thread.is_alive() and mon.speech_transcriber:
+                started_any = True
+                continue
+            try:
+                logging.info("Starting audio transcription on %s…", mon.channel_name)
+                if mon.start_speech_transcription():
+                    started_any = True
+            except Exception as e:
+                logging.warning("Audio transcription skipped on %s: %s", mon.channel_name, e)
+
         if self._speech_host_alive():
             return True
 
         self._speech_channel_id = None
         candidates: List["NewsMonitor"] = []
-        if preferred is not None and preferred.is_running:
+        if (
+            preferred is not None
+            and preferred.is_running
+            and not preferred.audio_only
+        ):
             candidates.append(preferred)
         for cid, mon in self.monitors.items():
             if preferred is not None and mon is preferred:
+                continue
+            if mon.audio_only:
                 continue
             if mon.is_running and self.channel_configs.get(cid, {}).get('enabled', True):
                 candidates.append(mon)
@@ -1581,6 +1687,8 @@ class MultiChannelNewsMonitor:
                 logging.warning("Audio transcription failed to start on %s", mon.channel_name)
             except Exception as e:
                 logging.warning("Audio transcription skipped on %s: %s", mon.channel_name, e)
+        if started_any:
+            return True
         logging.warning("No channel available for audio transcription")
         return False
 
@@ -1634,6 +1742,7 @@ class MultiChannelNewsMonitor:
             if self.is_running:
                 monitor.start_monitoring()
                 logging.info(f"Started monitoring for new channel: {config['name']}")
+                self._ensure_speech(preferred=monitor)
 
             return True
 

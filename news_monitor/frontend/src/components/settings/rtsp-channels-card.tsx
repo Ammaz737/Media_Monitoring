@@ -1,14 +1,14 @@
 "use client";
 
-import { useState } from "react";
-import { Link2, Pencil, Plus, Radio, Trash2, Video, Scan } from "lucide-react";
+import { useRef, useState } from "react";
+import { ExternalLink, Link2, Pencil, Plus, Radio, Trash2, Video, Scan, Volume2 } from "lucide-react";
 import { SectionCard } from "@/components/ui/section-card";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogFooter } from "@/components/ui/dialog";
-import { RegionEditorDialog, isYoutubeStreamUrl } from "@/components/settings/region-editor-dialog";
+import { RegionEditorDialog, isAudioStreamUrl } from "@/components/settings/region-editor-dialog";
 import { TrackPlayerDialog } from "@/components/settings/track-player-dialog";
 import { cn } from "@/lib/utils";
 import type { RtspChannelConfig, TextRegionMap } from "@/lib/types";
@@ -39,7 +39,6 @@ const priorityVariant = (p: string) =>
   p === "high" ? "high" : p === "medium" ? "medium" : "low";
 
 export function RtspChannelsCard({
-  defaultUrl,
   channels,
   channelEnabled,
   onToggle,
@@ -53,7 +52,7 @@ export function RtspChannelsCard({
   const entries = Object.entries(channels);
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
-  const [rtspUrl, setRtspUrl] = useState(defaultUrl || "");
+  const [rtspUrl, setRtspUrl] = useState("");
   const [priority, setPriority] = useState("medium");
   const [pendingDelete, setPendingDelete] = useState<{
     id: string;
@@ -77,10 +76,15 @@ export function RtspChannelsCard({
     id: string;
     name: string;
   } | null>(null);
+  const [audioPlay, setAudioPlay] = useState<{
+    name: string;
+    url: string;
+  } | null>(null);
+  const liveAudioRef = useRef<HTMLAudioElement | null>(null);
 
   const resetForm = () => {
     setName("");
-    setRtspUrl(defaultUrl || "");
+    setRtspUrl("");
     setPriority("medium");
     setShowForm(false);
   };
@@ -133,7 +137,7 @@ export function RtspChannelsCard({
 
   return (
     <SectionCard
-      title="RTSP Channels"
+      title="Channels"
       icon={<Radio className="h-5 w-5 text-primary" />}
       accent="primary"
       contentClassName="font-sans"
@@ -141,7 +145,7 @@ export function RtspChannelsCard({
       <div dir="ltr" className="space-y-4">
         <div className="flex items-center justify-between gap-3">
           <p className="text-xs text-slate-500">
-            Stored in the database. Enabled channels start automatically with the
+            RTSP, YouTube, or FM/Icecast audio. Enabled channels start with the
             app.
           </p>
           {onAdd && (
@@ -168,19 +172,19 @@ export function RtspChannelsCard({
                 id="new-ch-name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="News Channel 5"
+                placeholder="News Channel 5 or FM 101 Karachi"
                 disabled={busy}
               />
             </div>
             <div className="space-y-1.5">
               <label className="text-xs font-medium text-slate-600" htmlFor="new-ch-url">
-                RTSP URL
+                Stream URL
               </label>
               <Input
                 id="new-ch-url"
                 value={rtspUrl}
                 onChange={(e) => setRtspUrl(e.target.value)}
-                placeholder="rtsp://user:pass@ip:554/Streaming/Channels/501"
+                placeholder="rtsp://… or https://host/stream"
                 className="font-mono text-xs"
                 disabled={busy}
               />
@@ -221,11 +225,13 @@ export function RtspChannelsCard({
         <div className="scroll-panel max-h-[360px] space-y-3 pe-1">
           {entries.length === 0 && (
             <p className="rounded-xl border border-dashed border-slate-200 bg-white px-4 py-8 text-center text-sm text-slate-500">
-              No RTSP channels yet. Add one to start monitoring.
+              No channels yet. Add an RTSP, YouTube, or FM stream URL.
             </p>
           )}
           {entries.map(([id, ch], index) => {
             const enabled = channelEnabled[id] ?? ch.enabled;
+            const audioOnly = isAudioStreamUrl(ch.rtsp_url);
+            const rtspOnly = ch.rtsp_url.trim().toLowerCase().startsWith("rtsp://");
             return (
               <article
                 key={id}
@@ -238,7 +244,11 @@ export function RtspChannelsCard({
                       enabled ? "bg-emerald-50 text-emerald-600" : "bg-slate-100 text-slate-400"
                     )}
                   >
-                    <Video className="h-5 w-5" />
+                    {audioOnly ? (
+                      <Volume2 className="h-5 w-5" />
+                    ) : (
+                      <Video className="h-5 w-5" />
+                    )}
                   </div>
 
                     <div className="min-w-0 flex-1 space-y-2">
@@ -268,6 +278,12 @@ export function RtspChannelsCard({
                         />
                         {enabled ? "Enabled" : "Disabled"}
                       </span>
+                      {audioOnly && (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-violet-50 px-2 py-0.5 text-[10px] font-medium text-violet-700">
+                          <Volume2 className="h-3 w-3" />
+                          Audio
+                        </span>
+                      )}
                       {ch.has_custom_regions && (
                         <span className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-2 py-0.5 text-[10px] font-medium text-sky-700">
                           <Scan className="h-3 w-3" />
@@ -292,25 +308,27 @@ export function RtspChannelsCard({
                           Edit URL
                         </Button>
                       )}
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="h-8 text-xs"
-                        disabled={busy}
-                        onClick={() =>
-                          setRegionEdit({
-                            id,
-                            name: ch.name,
-                            streamUrl: ch.rtsp_url,
-                            regions: ch.text_regions,
-                          })
-                        }
-                      >
-                        <Scan className="h-3.5 w-3.5" />
-                        Edit OCR regions
-                      </Button>
-                      {!isYoutubeStreamUrl(ch.rtsp_url) && (
+                      {!audioOnly && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-8 text-xs"
+                          disabled={busy}
+                          onClick={() =>
+                            setRegionEdit({
+                              id,
+                              name: ch.name,
+                              streamUrl: ch.rtsp_url,
+                              regions: ch.text_regions,
+                            })
+                          }
+                        >
+                          <Scan className="h-3.5 w-3.5" />
+                          Edit OCR regions
+                        </Button>
+                      )}
+                      {rtspOnly && (
                         <Button
                           type="button"
                           size="sm"
@@ -323,6 +341,21 @@ export function RtspChannelsCard({
                         >
                           <Video className="h-3.5 w-3.5" />
                           Play track
+                        </Button>
+                      )}
+                      {audioOnly && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-8 text-xs"
+                          disabled={busy}
+                          onClick={() =>
+                            setAudioPlay({ name: ch.name, url: ch.rtsp_url })
+                          }
+                        >
+                          <Volume2 className="h-3.5 w-3.5" />
+                          Play
                         </Button>
                       )}
                     </div>
@@ -377,7 +410,7 @@ export function RtspChannelsCard({
             Edit stream URL
           </h3>
           <p className="mt-2 text-sm leading-relaxed text-slate-600">
-            Update the RTSP or YouTube URL for{" "}
+            Update the RTSP, YouTube, or FM stream URL for{" "}
             <span className="font-semibold text-slate-900">
               {urlEdit?.name}
             </span>
@@ -402,7 +435,7 @@ export function RtspChannelsCard({
               id="edit-ch-url"
               value={editUrlValue}
               onChange={(e) => setEditUrlValue(e.target.value)}
-              placeholder="https://www.youtube.com/watch?v=…&quality=720"
+              placeholder="https://host/stream or YouTube URL"
               className="font-mono text-xs"
               disabled={savingUrl}
               autoFocus
@@ -502,6 +535,52 @@ export function RtspChannelsCard({
           channelName={trackPlay.name}
         />
       )}
+
+      <Dialog
+        open={audioPlay !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            liveAudioRef.current?.pause();
+            setAudioPlay(null);
+          }
+        }}
+        className="max-w-lg p-6"
+      >
+        <div className="pe-8">
+          <h3 className="flex items-center gap-2 text-lg font-semibold text-slate-900">
+            <Volume2 className="h-5 w-5 text-primary" />
+            Play live
+          </h3>
+          <p className="mt-2 text-sm leading-relaxed text-slate-600">
+            Listen to{" "}
+            <span className="font-semibold text-slate-900">
+              {audioPlay?.name}
+            </span>
+          </p>
+          {audioPlay && (
+            <audio
+              key={audioPlay.url}
+              ref={liveAudioRef}
+              className="mt-4 w-full"
+              controls
+              autoPlay
+              src={audioPlay.url}
+            />
+          )}
+        </div>
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => {
+              liveAudioRef.current?.pause();
+              setAudioPlay(null);
+            }}
+          >
+            Close
+          </Button>
+        </DialogFooter>
+      </Dialog>
     </SectionCard>
   );
 }

@@ -177,6 +177,7 @@ PROCESSING_CONFIG = {
 
 # Ollama vision OCR fallback for mid-confidence UTRNet results
 # Band: utrnet_min <= confidence < utrnet_high → ask Ollama; only keep high-confidence replies
+# Also ask Ollama when high-conf UTRNet text contains digits (UTRNet often misreads numbers)
 OLLAMA_OCR_CONFIG = {
     'enabled': True,
     'base_url': os.environ.get('OLLAMA_HOST', 'http://127.0.0.1:11434').rstrip('/'),
@@ -204,7 +205,7 @@ ROBOFLOW_CONFIG = {
     'model_id': 'detection-of-news-bottom-tickers/2',
     'api_url': 'https://serverless.roboflow.com',
     'api_key': os.environ.get('ROBOFLOW_API_KEY', 'kPvHrHsrS6S5pm0RLf2h').strip(),
-    'det_conf_min': 0.45,
+    'det_conf_min': 0.5,
     'ocr_classes': {'ArtificialUrdu', 'bottom ticker', 'mid ticker text'},
     'primary_pref': ('ArtificialUrdu', 'bottom ticker', 'mid ticker text'),
 }
@@ -216,7 +217,7 @@ YOLO_TICKER_CONFIG = {
     'weights': BASE_DIR / 'static' / 'urdunews_yolo26s_best.pt',
     'device': None,  # None = auto; or 'cpu' / 'cuda' / '0'
     'imgsz': 640,
-    'det_conf_min': 0.45,
+    'det_conf_min': 0.5,
     'ocr_classes': {'UrduNews'},
     'primary_pref': ('UrduNews',),
 }

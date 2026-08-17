@@ -50,6 +50,21 @@ def is_youtube_url(url: str) -> bool:
     return "youtube.com" in u or "youtu.be" in u or "youtube-nocookie.com" in u
 
 
+def is_audio_stream_url(url: str) -> bool:
+    """HTTP(S) Icecast/Shoutcast/HLS audio — not RTSP or YouTube video.
+
+    ponytail: URL heuristic; add source_type column when print crawler lands.
+    """
+    u = (url or "").strip().lower()
+    if not u.startswith(("http://", "https://")):
+        return False
+    if is_youtube_url(u):
+        return False
+    if ".m3u8" in u or "manifest/hls" in u:
+        return False
+    return True
+
+
 def redact_stream_url(url: str) -> str:
     """Hide credentials in RTSP/HTTP URLs for safe logging."""
     url = (url or "").strip()
@@ -79,6 +94,8 @@ def stream_url_kind(url: str) -> str:
         return "youtube"
     if ".m3u8" in u or "manifest/hls" in u:
         return "hls"
+    if is_audio_stream_url(u):
+        return "audio"
     if u.startswith("http://") or u.startswith("https://"):
         return "http"
     return "stream"

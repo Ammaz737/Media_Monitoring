@@ -1,7 +1,8 @@
 """
-Ollama vision OCR fallback for mid-confidence UTRNet results.
+Ollama vision OCR fallback for UTRNet.
 
-Only used when UTRNet confidence is in [utrnet_min, utrnet_high).
+Used when UTRNet confidence is in [utrnet_min, utrnet_high), or when
+high-confidence UTRNet text contains digits (UTRNet often misreads numbers).
 Unreadable crops must return empty text + very low confidence and are discarded.
 """
 
@@ -23,6 +24,7 @@ import urllib.request
 from config import OLLAMA_OCR_CONFIG
 
 _JSON_RE = re.compile(r"\{[^{}]*\}", re.DOTALL)
+_DIGIT_RE = re.compile(r"[0-9]")  # ASCII only — Urdu/Arabic digits skip this gate
 
 _SYSTEM_PROMPT = (
     "You are an Urdu TV news ticker OCR reader. "
@@ -55,9 +57,14 @@ def _user_prompt(draft_text: str, draft_confidence: Optional[float] = None) -> s
         "0.50–0.80 if partly readable; <=0.10 if blurry, garbled, cut off, or blank "
         "(then set text to \"\").\n"
         "4. Never copy the draft unless it matches the image character-for-character.\n"
-        "5. Reply with JSON only, no markdown:\n"
+        "5. UTRNet often misreads digits — copy every number from the IMAGE, not the draft.\n"
+        "6. Reply with JSON only, no markdown:\n"
         '{"text":"...","confidence":0.0}\n'
     )
+
+
+def _has_digits(text: str) -> bool:
+    return bool(_DIGIT_RE.search(text or ""))
 
 
 class OllamaVisionOcr:
@@ -75,10 +82,14 @@ class OllamaVisionOcr:
     def enabled(self) -> bool:
         return bool(self.cfg.get("enabled", True))
 
-    def utrnet_needs_ollama(self, confidence: float) -> bool:
+    def utrnet_needs_ollama(self, confidence: float, text: str = "") -> bool:
         low = float(self.cfg.get("utrnet_min", 0.80))
         high = float(self.cfg.get("utrnet_high", 0.98))
-        return low <= float(confidence) < high
+        conf = float(confidence)
+        if low <= conf < high:
+            return True
+        # High-conf UTRNet still misreads digits — verify those with Ollama
+        return conf >= high and _has_digits(text)
 
     def utrnet_is_high(self, confidence: float) -> bool:
         return float(confidence) >= float(self.cfg.get("utrnet_high", 0.98))
