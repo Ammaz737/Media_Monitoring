@@ -21,6 +21,8 @@ export interface TextExtraction {
   screenshot_path?: string;
   /** utrnet | ollama — which engine produced the saved text */
   ocr_engine?: string;
+  /** pg_trgm word_similarity when returned from search */
+  match_score?: number;
 }
 
 export interface AudioTranscription {
@@ -32,6 +34,8 @@ export interface AudioTranscription {
   channel_name: string;
   language?: string;
   audio_path?: string;
+  /** pg_trgm word_similarity when returned from search */
+  match_score?: number;
 }
 
 export interface Alert {

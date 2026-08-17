@@ -232,7 +232,7 @@ export const api = {
     end_date?: string;
     channel?: string;
     region?: string;
-    min_confidence?: number;
+    fuzzy_threshold?: number;
     limit?: number;
   }) => {
     const q = new URLSearchParams();
@@ -241,8 +241,8 @@ export const api = {
     if (params.end_date) q.set("end_date", params.end_date);
     if (params.channel) q.set("channel", params.channel);
     if (params.region) q.set("region", params.region);
-    if (params.min_confidence != null)
-      q.set("min_confidence", String(params.min_confidence));
+    if (params.fuzzy_threshold != null)
+      q.set("fuzzy_threshold", String(params.fuzzy_threshold));
     q.set(
       "limit",
       String(params.limit ?? siteConfig.pagination.searchResults)
@@ -257,7 +257,7 @@ export const api = {
     start_date?: string;
     end_date?: string;
     channel?: string;
-    min_confidence?: number;
+    fuzzy_threshold?: number;
     limit?: number;
   }) => {
     const q = new URLSearchParams();
@@ -265,8 +265,8 @@ export const api = {
     if (params.start_date) q.set("start_date", params.start_date);
     if (params.end_date) q.set("end_date", params.end_date);
     if (params.channel) q.set("channel", params.channel);
-    if (params.min_confidence != null)
-      q.set("min_confidence", String(params.min_confidence));
+    if (params.fuzzy_threshold != null)
+      q.set("fuzzy_threshold", String(params.fuzzy_threshold));
     q.set(
       "limit",
       String(params.limit ?? siteConfig.pagination.searchResults)

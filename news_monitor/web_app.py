@@ -431,6 +431,7 @@ def api_search_text():
         channel = request.args.get('channel')
         region = request.args.get('region')
         min_confidence = request.args.get('min_confidence', type=float)
+        fuzzy_threshold = request.args.get('fuzzy_threshold', type=float)
         limit = request.args.get('limit', WEB_CONFIG['results_per_page'], type=int)
         limit = max(1, min(int(limit or 1000), WEB_CONFIG['max_search_results']))
         
@@ -450,6 +451,7 @@ def api_search_text():
             region_name=region if region else None,
             channel_name=channel if channel else None,
             min_confidence=min_confidence,
+            fuzzy_threshold=fuzzy_threshold,
             limit=limit
         )
         
@@ -472,6 +474,7 @@ def api_search_audio():
         end_date = request.args.get('end_date')
         channel = request.args.get('channel')
         min_confidence = request.args.get('min_confidence', type=float)
+        fuzzy_threshold = request.args.get('fuzzy_threshold', type=float)
         limit = request.args.get('limit', WEB_CONFIG['results_per_page'], type=int)
         limit = max(1, min(int(limit or 1000), WEB_CONFIG['max_search_results']))
         
@@ -490,6 +493,7 @@ def api_search_audio():
             end_date=end_datetime,
             channel_name=channel if channel else None,
             min_confidence=min_confidence,
+            fuzzy_threshold=fuzzy_threshold,
             limit=limit
         )
         

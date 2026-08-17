@@ -146,6 +146,13 @@ DATABASE_CONFIG = {
     'backup_interval': 3600,  # seconds
 }
 
+# Fuzzy text search (pg_trgm word_similarity threshold for OCR typos)
+SEARCH_CONFIG = {
+    'fuzzy_similarity_threshold': float(
+        os.environ.get('SEARCH_FUZZY_THRESHOLD', '0.35')
+    ),
+}
+
 # Processing Configuration
 PROCESSING_CONFIG = {
     'frame_interval': 2.0,  # Roboflow capture cadence (seconds)

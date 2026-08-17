@@ -4,7 +4,11 @@ import type { AudioTranscription } from "@/lib/types";
 import { formatTimestamp, transcriptionAudioUrl } from "@/lib/utils";
 
 export function TranscriptionItem({ item }: { item: AudioTranscription }) {
-  const confidencePct = item.confidence * 100;
+  const showThreshold = item.match_score != null;
+  const scorePct = showThreshold
+    ? item.match_score! * 100
+    : item.confidence * 100;
+  const scoreLabel = showThreshold ? "Threshold" : "Confidence";
   const audioUrl = transcriptionAudioUrl(item.audio_path);
 
   return (
@@ -27,10 +31,10 @@ export function TranscriptionItem({ item }: { item: AudioTranscription }) {
       <p className="urdu-text line-clamp-3 text-slate-900">{item.transcribed_text}</p>
       <div className="mt-3 space-y-2" dir="ltr">
         <div className="flex items-center justify-between text-xs text-slate-500">
-          <span>Confidence</span>
-          <span className="font-medium">{confidencePct.toFixed(1)}%</span>
+          <span>{scoreLabel}</span>
+          <span className="font-medium">{scorePct.toFixed(1)}%</span>
         </div>
-        <Progress value={confidencePct} barClassName="bg-success" />
+        <Progress value={scorePct} barClassName="bg-success" />
         <Badge variant="channel" className="text-[10px]">
           {item.channel_name}
         </Badge>

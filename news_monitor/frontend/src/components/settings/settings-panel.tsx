@@ -1,15 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Layers, Settings2, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { getFallbackAppConfig } from "@/lib/fallback-config";
 import type { AppConfig } from "@/lib/types";
-import { SectionCard } from "@/components/ui/section-card";
 import { AlertKeywordsCard } from "@/components/settings/alert-keywords-card";
 import { RtspChannelsCard } from "@/components/settings/rtsp-channels-card";
-import { Badge } from "@/components/ui/badge";
-import { siteConfig } from "@/config/site";
 import { UsersCard } from "@/components/settings/users-card";
 import { useAuth } from "@/components/auth/auth-provider";
 

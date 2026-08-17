@@ -1,6 +1,6 @@
 import { type ClassValue, clsx } from "clsx";
 import { twMerge } from "tailwind-merge";
-import { getAuthToken } from "@/lib/api";
+import { getAuthToken, getFlaskDirectBase } from "@/lib/api";
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -44,7 +44,7 @@ function withAuthToken(url: string): string {
   return `${url}${sep}token=${encodeURIComponent(token)}`;
 }
 
-/** Build same-origin URL for a stored screenshot absolute/relative path. */
+/** Build URL for a stored screenshot (basename from absolute/relative path). */
 export function screenshotUrl(
   path: string | null | undefined
 ): string | null {
@@ -52,7 +52,10 @@ export function screenshotUrl(
   const normalized = path.replace(/\\/g, "/");
   const filename = normalized.split("/").pop();
   if (!filename) return null;
-  return withAuthToken(`/api/screenshots/${encodeURIComponent(filename)}`);
+  // Hit Flask directly — Next rewrite can break binary img responses
+  return withAuthToken(
+    `${getFlaskDirectBase()}/api/screenshots/${encodeURIComponent(filename)}`
+  );
 }
 
 /** Build same-origin URL for a stored transcription WAV clip. */

@@ -21,7 +21,7 @@ export default function SearchPage() {
     end_date: searchParams.get("end_date") ?? "",
     channel: searchParams.get("channel") ?? "",
     region: searchParams.get("region") ?? "",
-    min_confidence: searchParams.get("min_confidence") ?? "0.85",
+    fuzzy_threshold: searchParams.get("fuzzy_threshold") ?? "0.35",
   });
   const [textResults, setTextResults] = useState<TextExtraction[]>([]);
   const [audioResults, setAudioResults] = useState<AudioTranscription[]>([]);
@@ -41,8 +41,8 @@ export default function SearchPage() {
           : undefined,
         channel: active.channel || undefined,
         region: active.region || undefined,
-        min_confidence: active.min_confidence
-          ? parseFloat(active.min_confidence)
+        fuzzy_threshold: active.fuzzy_threshold
+          ? parseFloat(active.fuzzy_threshold)
           : undefined,
       };
       const [text, audio] = await Promise.all([

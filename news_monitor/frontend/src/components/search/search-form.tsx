@@ -15,7 +15,7 @@ export interface SearchFilters {
   end_date: string;
   channel: string;
   region: string;
-  min_confidence: string;
+  fuzzy_threshold: string;
 }
 
 interface SearchFormProps {
@@ -56,8 +56,8 @@ export function SearchForm({
   const set = (key: keyof SearchFilters, value: string) =>
     onChange({ ...filters, [key]: value });
 
-  const confidenceVal = filters.min_confidence
-    ? parseFloat(filters.min_confidence)
+  const fuzzyVal = filters.fuzzy_threshold
+    ? parseFloat(filters.fuzzy_threshold)
     : 0;
 
   return (
@@ -150,19 +150,19 @@ export function SearchForm({
 
         <div>
           <div className="flex items-center justify-between">
-            <Label htmlFor="min_confidence">Min Confidence</Label>
+            <Label htmlFor="fuzzy_threshold">Fuzzy Threshold</Label>
             <span className="text-sm font-mono font-medium text-primary">
-              {confidenceVal.toFixed(1)}
+              {fuzzyVal.toFixed(2)}
             </span>
           </div>
           <input
-            id="min_confidence"
+            id="fuzzy_threshold"
             type="range"
             min={0}
             max={1}
-            step={0.1}
-            value={confidenceVal}
-            onChange={(e) => set("min_confidence", e.target.value)}
+            step={0.05}
+            value={fuzzyVal}
+            onChange={(e) => set("fuzzy_threshold", e.target.value)}
             className="mt-2 h-2 w-full cursor-pointer appearance-none rounded-lg bg-slate-200 accent-primary"
           />
         </div>

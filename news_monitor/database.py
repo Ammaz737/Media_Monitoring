@@ -16,7 +16,13 @@ import uuid
 import psycopg2
 from psycopg2 import IntegrityError
 
-from config import BASE_DIR, DATABASE_CONFIG, STORAGE_CONFIG, AUTH_CONFIG
+from config import (
+    BASE_DIR,
+    AUTH_CONFIG,
+    DATABASE_CONFIG,
+    SEARCH_CONFIG,
+    STORAGE_CONFIG,
+)
 
 
 def _cell(value):
@@ -30,6 +36,46 @@ def _cell(value):
 
 def _row_dict(columns, row) -> Dict:
     return {col: _cell(val) for col, val in zip(columns, row)}
+
+
+def _fuzzy_text_threshold(override: Optional[float] = None) -> float:
+    """Resolve pg_trgm similarity threshold.
+
+    If `override` is provided (from UI), it wins over SEARCH_CONFIG.
+    """
+    if override is not None:
+        return float(override)
+    return float(SEARCH_CONFIG.get("fuzzy_similarity_threshold", 0.35))
+
+
+def _append_fuzzy_text_filter(
+    sql: str,
+    params: list,
+    column: str,
+    query: str,
+    threshold: float,
+) -> str:
+    """Match exact substring or pg_trgm word_similarity for OCR typos."""
+    sql += f"""
+        AND (
+            {column} ILIKE %s
+            OR word_similarity(%s, {column}) > %s
+        )"""
+    params.extend([f"%{query}%", query, threshold])
+    return sql
+
+
+def _append_fuzzy_text_order(
+    sql: str, params: list, column: str, query: str, limit: int
+) -> str:
+    sql += f"""
+        ORDER BY
+            CASE WHEN {column} ILIKE %s THEN 0 ELSE 1 END,
+            word_similarity(%s, {column}) DESC,
+            timestamp DESC
+        LIMIT %s"""
+    params.extend([f"%{query}%", query, limit])
+    return sql
 
 
 INITIAL_REVISION = "0001_initial"
@@ -261,41 +307,69 @@ class NewsDatabase:
         region_name: str = None,
         channel_name: str = None,
         min_confidence: float = None,
+        fuzzy_threshold: Optional[float] = None,
         limit: int = 100,
     ) -> List[Dict]:
         with self._cursor() as cursor:
-            sql = "SELECT * FROM text_extractions WHERE 1=1"
             params: list = []
+            col = "extracted_text"
 
             if query:
-                sql += " AND extracted_text LIKE %s"
-                params.append(f"%{query}%")
+                threshold = _fuzzy_text_threshold(fuzzy_threshold)
+                pattern = f"%{query}%"
+                sql = f"""
+                    SELECT t.*,
+                        GREATEST(
+                            word_similarity(%s, t.{col}),
+                            CASE WHEN t.{col} ILIKE %s THEN 1.0 ELSE 0 END
+                        ) AS match_score
+                    FROM text_extractions t
+                    WHERE 1=1
+                """
+                params.extend([query, pattern])
+                sql = _append_fuzzy_text_filter(
+                    sql, params, f"t.{col}", query, threshold
+                )
+            else:
+                sql = "SELECT * FROM text_extractions WHERE 1=1"
+
+            ts_col = "t.timestamp" if query else "timestamp"
             if start_date:
-                sql += " AND timestamp >= %s"
+                sql += f" AND {ts_col} >= %s"
                 params.append(start_date)
             if end_date:
-                sql += " AND timestamp <= %s"
+                sql += f" AND {ts_col} <= %s"
                 params.append(end_date)
             if region_name:
-                sql += " AND region_name = %s"
+                rn_col = "t.region_name" if query else "region_name"
+                sql += f" AND {rn_col} = %s"
                 params.append(region_name)
             if channel_name:
-                sql += " AND channel_name = %s"
+                ch_col = "t.channel_name" if query else "channel_name"
+                sql += f" AND {ch_col} = %s"
                 params.append(channel_name)
             if min_confidence:
-                sql += " AND confidence >= %s"
+                conf_col = "t.confidence" if query else "confidence"
+                sql += f" AND {conf_col} >= %s"
                 params.append(min_confidence)
 
-            sql += " ORDER BY timestamp DESC LIMIT %s"
-            params.append(limit)
+            if query:
+                sql = _append_fuzzy_text_order(
+                    sql, params, f"t.{col}", query, limit=limit
+                )
+            else:
+                sql += " ORDER BY timestamp DESC LIMIT %s"
+                params.append(limit)
 
             cursor.execute(sql, params)
             columns = [desc[0] for desc in cursor.description]
             results = []
             for row in cursor.fetchall():
                 record = _row_dict(columns, row)
-                if record["region_coords"]:
+                if record.get("region_coords"):
                     record["region_coords"] = json.loads(record["region_coords"])
+                if record.get("match_score") is not None:
+                    record["match_score"] = round(float(record["match_score"]), 4)
                 results.append(record)
             return results
 
@@ -306,34 +380,65 @@ class NewsDatabase:
         end_date: datetime = None,
         channel_name: str = None,
         min_confidence: float = None,
+        fuzzy_threshold: Optional[float] = None,
         limit: int = 100,
     ) -> List[Dict]:
         with self._cursor() as cursor:
-            sql = "SELECT * FROM audio_transcriptions WHERE 1=1"
             params: list = []
+            col = "transcribed_text"
 
             if query:
-                sql += " AND transcribed_text LIKE %s"
-                params.append(f"%{query}%")
+                threshold = _fuzzy_text_threshold(fuzzy_threshold)
+                pattern = f"%{query}%"
+                sql = f"""
+                    SELECT t.*,
+                        GREATEST(
+                            word_similarity(%s, t.{col}),
+                            CASE WHEN t.{col} ILIKE %s THEN 1.0 ELSE 0 END
+                        ) AS match_score
+                    FROM audio_transcriptions t
+                    WHERE 1=1
+                """
+                params.extend([query, pattern])
+                sql = _append_fuzzy_text_filter(
+                    sql, params, f"t.{col}", query, threshold
+                )
+            else:
+                sql = "SELECT * FROM audio_transcriptions WHERE 1=1"
+
+            ts_col = "t.timestamp" if query else "timestamp"
             if start_date:
-                sql += " AND timestamp >= %s"
+                sql += f" AND {ts_col} >= %s"
                 params.append(start_date)
             if end_date:
-                sql += " AND timestamp <= %s"
+                sql += f" AND {ts_col} <= %s"
                 params.append(end_date)
             if channel_name:
-                sql += " AND channel_name = %s"
+                ch_col = "t.channel_name" if query else "channel_name"
+                sql += f" AND {ch_col} = %s"
                 params.append(channel_name)
             if min_confidence:
-                sql += " AND confidence >= %s"
+                conf_col = "t.confidence" if query else "confidence"
+                sql += f" AND {conf_col} >= %s"
                 params.append(min_confidence)
 
-            sql += " ORDER BY timestamp DESC LIMIT %s"
-            params.append(limit)
+            if query:
+                sql = _append_fuzzy_text_order(
+                    sql, params, f"t.{col}", query, limit=limit
+                )
+            else:
+                sql += " ORDER BY timestamp DESC LIMIT %s"
+                params.append(limit)
 
             cursor.execute(sql, params)
             columns = [desc[0] for desc in cursor.description]
-            return [_row_dict(columns, row) for row in cursor.fetchall()]
+            results = []
+            for row in cursor.fetchall():
+                record = _row_dict(columns, row)
+                if record.get("match_score") is not None:
+                    record["match_score"] = round(float(record["match_score"]), 4)
+                results.append(record)
+            return results
 
     def paginate_text_extractions(self, page: int = 1, per_page: int = 50) -> Dict:
         page = max(1, int(page or 1))

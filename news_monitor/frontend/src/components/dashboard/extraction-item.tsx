@@ -20,7 +20,11 @@ import {
 export function ExtractionItem({ item }: { item: TextExtraction }) {
   const [open, setOpen] = useState(false);
   const [imgFailed, setImgFailed] = useState(false);
+  const showThreshold = item.match_score != null;
+  const thresholdPct = showThreshold ? item.match_score! * 100 : null;
   const confidencePct = item.confidence * 100;
+  const cardScorePct = thresholdPct ?? confidencePct;
+  const cardScoreLabel = showThreshold ? "Threshold" : "Confidence";
   const shotUrl = screenshotUrl(item.screenshot_path);
 
   return (
@@ -56,12 +60,12 @@ export function ExtractionItem({ item }: { item: TextExtraction }) {
         </p>
         <div className="mt-3 space-y-2" dir="ltr">
           <div className="flex items-center justify-between text-xs text-slate-500">
-            <span>Confidence</span>
+            <span>{cardScoreLabel}</span>
             <span className="font-medium text-slate-700">
-              {confidencePct.toFixed(1)}%
+              {cardScorePct.toFixed(1)}%
             </span>
           </div>
-          <Progress value={confidencePct} />
+          <Progress value={cardScorePct} />
           <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
             <div className="flex flex-wrap items-center gap-2">
               <span>Priority: {item.priority}</span>
