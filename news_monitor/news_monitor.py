@@ -19,7 +19,7 @@ import json
 from config import (
     RTSP_CHANNELS, RTSP_URL, TEXT_REGIONS, YOUTUBE_TEXT_REGIONS,
     PROCESSING_CONFIG, STORAGE_CONFIG, ALERTS_CONFIG, SPEECH_CONFIG,
-    OLLAMA_OCR_CONFIG, ROBOFLOW_CONFIG,
+    OLLAMA_OCR_CONFIG, ROBOFLOW_CONFIG, YOLO_TICKER_CONFIG,
     normalize_text_regions,
 )
 from utrnet_wrapper import (
@@ -357,6 +357,9 @@ class NewsMonitor:
 
     def _use_roboflow_ticker(self) -> bool:
         return bool(ROBOFLOW_CONFIG.get("enabled")) and not is_youtube_url(self.source_url)
+
+    def _use_yolo_ticker(self) -> bool:
+        return bool(YOLO_TICKER_CONFIG.get("enabled")) and not is_youtube_url(self.source_url)
 
     def set_text_regions(self, regions: Optional[Dict]) -> None:
         """Hot-update OCR crop boxes for this channel (Settings editor)."""
@@ -830,7 +833,15 @@ class NewsMonitor:
         timestamp = frame_data['timestamp']
         
         try:
-            if self._use_roboflow_ticker():
+            regions = None
+            # YOLO local .pt takes precedence when enabled; Roboflow unchanged otherwise.
+            if self._use_yolo_ticker():
+                from yolo_ticker import regions_from_detection
+
+                regions, self._roboflow_box = regions_from_detection(
+                    frame, self.channel_name, self._roboflow_box
+                )
+            elif self._use_roboflow_ticker():
                 from roboflow_ticker import regions_from_detection
 
                 regions, self._roboflow_box = regions_from_detection(

@@ -41,6 +41,7 @@ flake8
 # Additional CV dependencies
 scikit-image
 matplotlib
+ultralytics
 
 # For production deployment
 gunicorn

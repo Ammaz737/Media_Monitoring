@@ -20,7 +20,7 @@ news_monitor/data/runtime_config.json
 news_monitor/logs/
 **/.DS_Store
 *.pth
-*.pt
+.pt
 *.ckpt
 
 # Node / Next.js

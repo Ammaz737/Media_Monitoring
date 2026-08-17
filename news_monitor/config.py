@@ -200,13 +200,25 @@ OLLAMA_OCR_CONFIG = {
 
 # Roboflow dynamic ticker detection (RTSP only — same model as script.py)
 ROBOFLOW_CONFIG = {
-    'enabled': True,
+    'enabled': False,
     'model_id': 'detection-of-news-bottom-tickers/2',
     'api_url': 'https://serverless.roboflow.com',
     'api_key': os.environ.get('ROBOFLOW_API_KEY', 'kPvHrHsrS6S5pm0RLf2h').strip(),
-    'det_conf_min': 0.35,
+    'det_conf_min': 0.45,
     'ocr_classes': {'ArtificialUrdu', 'bottom ticker', 'mid ticker text'},
     'primary_pref': ('ArtificialUrdu', 'bottom ticker', 'mid ticker text'),
+}
+
+# Local Ultralytics YOLO ticker detection (parallel to Roboflow — see yolo_ticker.py).
+# Set enabled=True (and ROBOFLOW_CONFIG enabled=False) to use this path from news_monitor.
+YOLO_TICKER_CONFIG = {
+    'enabled': True,
+    'weights': BASE_DIR / 'static' / 'urdunews_yolo26s_best.pt',
+    'device': None,  # None = auto; or 'cpu' / 'cuda' / '0'
+    'imgsz': 640,
+    'det_conf_min': 0.45,
+    'ocr_classes': {'UrduNews'},
+    'primary_pref': ('UrduNews',),
 }
 
 # Auto-start RTSP monitoring when Flask boots.
