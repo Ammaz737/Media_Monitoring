@@ -21,6 +21,10 @@ soundfile
 # Stream sources (YouTube live / VOD from dashboard URL)
 yt-dlp
 
+# Database
+psycopg2-binary
+alembic
+
 # Utilities
 requests
 inference-sdk

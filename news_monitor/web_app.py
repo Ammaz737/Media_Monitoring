@@ -3,7 +3,7 @@ Web Frontend Dashboard for News Monitor
 Flask-based web application for monitoring and searching news content
 """
 
-from flask import Flask, render_template, request, jsonify, Response, send_file, send_from_directory, abort
+from flask import Flask, render_template, request, jsonify, Response, send_file, send_from_directory, abort, g
 import json
 import logging
 from datetime import datetime, timedelta
@@ -23,6 +23,14 @@ from config import (
     normalize_text_regions, default_text_regions_for_url,
 )
 from database import NewsDatabase
+from auth import (
+    ROLES,
+    issue_token,
+    parse_token,
+    perms_for,
+    public_user,
+    verify_password,
+)
 from news_monitor import NewsMonitor, MultiChannelNewsMonitor
 from stream_resolver import is_youtube_url, resolve_stream_url, grab_stream_frame
 from nvr_playback import (
@@ -56,7 +64,7 @@ def add_cors_headers(response):
     else:
         response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
     return response
 
 
@@ -85,8 +93,55 @@ news_monitor_instance = None
 connected_clients = set()
 
 
+def _extract_token() -> str:
+    header = request.headers.get("Authorization") or ""
+    if header.lower().startswith("bearer "):
+        return header.split(" ", 1)[1].strip()
+    return (request.args.get("token") or "").strip()
+
+
+def _required_api_perm(method: str, path: str):
+    if method == "OPTIONS" or not path.startswith("/api/"):
+        return None
+    if path == "/api/auth/login":
+        return None
+    if path.startswith("/api/users"):
+        return "users"
+    if path.startswith("/api/auth/"):
+        return "read"
+    if method in ("POST", "PUT", "PATCH", "DELETE"):
+        if path.startswith("/api/monitor/"):
+            return "operate"
+        if "mark-read" in path or path.endswith("/mark-all-read"):
+            return "operate"
+        if path.startswith("/api/tracks"):
+            return "operate"
+        if path.startswith("/api/config"):
+            return "configure"
+        return "operate"
+    if "/snapshot" in path:
+        return "configure"
+    return "read"
+
+
+@app.before_request
+def enforce_rbac():
+    perm = _required_api_perm(request.method, request.path)
+    if perm is None:
+        return
+    user_id = parse_token(_extract_token())
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 401
+    user = db.get_user_by_id(user_id)
+    if not user or not user.get("is_active"):
+        return jsonify({"error": "Unauthorized"}), 401
+    g.user = user
+    if perm not in perms_for(user["role"]):
+        return jsonify({"error": "Forbidden"}), 403
+
+
 def refresh_rtsp_channels_cache():
-    """Seed SQLite channels if empty, then sync in-memory RTSP_CHANNELS."""
+    """Seed channels if empty, then sync in-memory RTSP_CHANNELS."""
     db.seed_rtsp_channels(DEFAULT_RTSP_CHANNELS)
     apply_rtsp_channels(db.get_rtsp_channels())
 
@@ -212,6 +267,91 @@ def settings():
     return render_template('settings.html')
 
 # API Routes
+
+@app.route('/api/auth/login', methods=['POST'])
+def api_login():
+    body = request.get_json(silent=True) or {}
+    username = (body.get('username') or '').strip()
+    password = body.get('password') or ''
+    user = db.get_user_by_username(username)
+    if (
+        not user
+        or not user.get('is_active')
+        or not verify_password(password, user.get('password_hash') or '')
+    ):
+        return jsonify({'error': 'Invalid username or password'}), 401
+    return jsonify({
+        'token': issue_token(user['id']),
+        'user': public_user(user),
+    })
+
+
+@app.route('/api/auth/me')
+def api_me():
+    return jsonify({'user': public_user(g.user)})
+
+
+@app.route('/api/auth/logout', methods=['POST'])
+def api_logout():
+    return jsonify({'success': True})
+
+
+@app.route('/api/users', methods=['GET', 'POST'])
+def api_users():
+    if request.method == 'GET':
+        return jsonify({'users': [public_user(u) for u in db.list_users()]})
+    body = request.get_json(silent=True) or {}
+    username = (body.get('username') or '').strip()
+    password = body.get('password') or ''
+    role = (body.get('role') or 'viewer').strip().lower()
+    if len(username) < 2 or len(password) < 6:
+        return jsonify({'error': 'Username min 2 characters, password min 6'}), 400
+    if role not in ROLES:
+        return jsonify({'error': 'Invalid role'}), 400
+    created = db.create_user(username, password, role)
+    if not created:
+        return jsonify({'error': 'Username already exists'}), 409
+    return jsonify({'user': public_user(created)}), 201
+
+
+@app.route('/api/users/<int:user_id>', methods=['PUT', 'DELETE'])
+def api_user_detail(user_id):
+    existing = db.get_user_by_id(user_id)
+    if not existing:
+        return jsonify({'error': 'User not found'}), 404
+
+    if request.method == 'DELETE':
+        if user_id == g.user['id']:
+            return jsonify({'error': 'Cannot delete your own account'}), 400
+        if existing['role'] == 'admin' and db.count_admins(exclude_id=user_id) < 1:
+            return jsonify({'error': 'Cannot delete the last admin'}), 409
+        if not db.delete_user(user_id):
+            return jsonify({'error': 'Delete failed'}), 400
+        return jsonify({'success': True})
+
+    body = request.get_json(silent=True) or {}
+    role = body.get('role')
+    password = body.get('password')
+    is_active = body.get('is_active')
+    new_role = (role or existing['role']).strip().lower()
+    new_active = existing['is_active'] if is_active is None else bool(is_active)
+    if role is not None and new_role not in ROLES:
+        return jsonify({'error': 'Invalid role'}), 400
+    if password is not None and password != '' and len(password) < 6:
+        return jsonify({'error': 'Password min 6 characters'}), 400
+    if existing['role'] == 'admin' and (new_role != 'admin' or not new_active):
+        if db.count_admins(exclude_id=user_id) < 1:
+            return jsonify({'error': 'Cannot demote or disable the last admin'}), 409
+    updated = db.update_user(
+        user_id,
+        password=password or None,
+        role=new_role,
+        is_active=new_active,
+    )
+    if not updated:
+        return jsonify({'error': 'Update failed'}), 400
+    return jsonify({'user': public_user(updated)})
+
 
 @app.route('/api/statistics')
 def api_statistics():
@@ -895,7 +1035,7 @@ def api_monitor_status():
 
 @app.route('/api/config/channels', methods=['POST'])
 def api_create_channel():
-    """Add a new RTSP channel (persisted in SQLite)."""
+    """Add a new RTSP channel (persisted in Postgres)."""
     try:
         body = request.get_json() or {}
         name = (body.get('name') or '').strip()
@@ -1109,8 +1249,17 @@ def api_channel_snapshot(channel_id):
 # WebSocket handlers for real-time updates
 if SOCKETIO_ENABLED and socketio:
     @socketio.on('connect')
-    def handle_connect():
-        """Handle client connection"""
+    def handle_connect(*args, **kwargs):
+        auth = args[0] if args else kwargs.get('auth')
+        token = ''
+        if isinstance(auth, dict):
+            token = (auth.get('token') or '').strip()
+        if not token:
+            token = _extract_token()
+        user_id = parse_token(token)
+        user = db.get_user_by_id(user_id) if user_id else None
+        if not user or not user.get('is_active'):
+            return False
         connected_clients.add(request.sid)
         emit('connected', {'message': 'Connected to news monitor'})
         logging.info(f"Client connected: {request.sid}")
@@ -1157,7 +1306,7 @@ def send_real_time_updates():
                     },
                 }
 
-                # Ensure datetime fields from SQLite rows are JSON-safe
+                # Ensure datetime fields from DB rows are JSON-safe
                 def _json_safe(obj):
                     if isinstance(obj, datetime):
                         return obj.isoformat()

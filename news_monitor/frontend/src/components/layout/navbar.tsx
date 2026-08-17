@@ -6,6 +6,8 @@ import { Tv } from "lucide-react";
 import { siteConfig } from "@/config/site";
 import { cn } from "@/lib/utils";
 import { ConnectionIndicator } from "@/components/layout/connection-indicator";
+import { useAuth } from "@/components/auth/auth-provider";
+import { Button } from "@/components/ui/button";
 
 interface NavbarProps {
   monitorRunning?: boolean;
@@ -14,6 +16,7 @@ interface NavbarProps {
 
 export function Navbar({ monitorRunning = false, connected = null }: NavbarProps) {
   const pathname = usePathname();
+  const { user, can, logout } = useAuth();
 
   return (
     <nav className="sticky top-0 z-50 border-b border-[#F1F5F9] bg-white/90 shadow-sm backdrop-blur-[12px]">
@@ -31,7 +34,9 @@ export function Navbar({ monitorRunning = false, connected = null }: NavbarProps
         </Link>
 
         <ul className="flex items-center gap-0.5">
-          {siteConfig.nav.map((item) => {
+          {siteConfig.nav
+            .filter((item) => item.href !== "/settings" || can("configure"))
+            .map((item) => {
             const active = pathname === item.href;
             return (
               <li key={item.href}>
@@ -55,6 +60,13 @@ export function Navbar({ monitorRunning = false, connected = null }: NavbarProps
         </ul>
 
         <div className="flex items-center justify-end gap-3">
+          <span className="hidden text-xs font-medium text-slate-500 sm:inline">
+            {user.username}
+            <span className="ms-1 text-slate-400">({user.role})</span>
+          </span>
+          <Button type="button" variant="ghost" size="sm" onClick={() => logout()}>
+            Sign out
+          </Button>
           <span
             className={cn(
               "hidden rounded-full px-3.5 py-1.5 text-xs font-medium sm:inline",

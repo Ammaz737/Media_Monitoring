@@ -8,6 +8,25 @@ from pathlib import Path
 
 # Base paths
 BASE_DIR = Path(__file__).parent
+
+
+def _load_dotenv() -> None:
+    """Load KEY=VALUE from .env without adding python-dotenv."""
+    for candidate in (BASE_DIR / ".env", BASE_DIR.parent / ".env"):
+        if not candidate.is_file():
+            continue
+        for raw in candidate.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            if key and key not in os.environ:
+                os.environ[key] = value.strip().strip("'").strip('"')
+        break
+
+
+_load_dotenv()
 UTRNET_DIR = (
     BASE_DIR.parent
     / "UTRNet-High-Resolution-Urdu-Text-Recognition-main"
@@ -16,7 +35,7 @@ UTRNET_DIR = (
 WEIGHTS_PATH = UTRNET_DIR / "best_norm_ED.pth"
 URDU_GLYPHS_PATH = UTRNET_DIR / "UrduGlyphs.txt"
 
-# Seed RTSP channels — written to SQLite on first boot, then DB is source of truth.
+# Seed RTSP channels — written to Postgres on first boot, then DB is source of truth.
 # Camera 192.168.2.173 — stream IDs 101, 201, ..., 801
 DEFAULT_RTSP_CHANNELS = {
     'channel_0': {
@@ -52,7 +71,7 @@ DEFAULT_RTSP_CHANNELS = {
     },
 }
 
-# In-memory cache synced from the `channels` SQLite table at web/monitor startup.
+# In-memory cache synced from the `channels` table at web/monitor startup.
 RTSP_CHANNELS = {cid: dict(cfg) for cid, cfg in DEFAULT_RTSP_CHANNELS.items()}
 
 # Default RTSP URL (for backward compatibility)
@@ -118,11 +137,13 @@ YOUTUBE_TEXT_REGIONS = {
     },
 }
 
-# Database Configuration
+# Database Configuration (Postgres). Override with DATABASE_URL in .env
 DATABASE_CONFIG = {
-    'type': 'sqlite',
-    'path': BASE_DIR / 'data' / 'news_monitor.db',
-    'backup_interval': 3600  # seconds
+    'url': os.environ.get(
+        'DATABASE_URL',
+        'postgresql://postgres@localhost:5432/news_monitor',
+    ),
+    'backup_interval': 3600,  # seconds
 }
 
 # Processing Configuration
@@ -269,7 +290,7 @@ def load_runtime_config() -> None:
             ALERTS_CONFIG['keywords'] = cleaned
         if 'alerts_enabled' in data:
             ALERTS_CONFIG['enabled'] = bool(data['alerts_enabled'])
-        # rtsp_channels_enabled is legacy — channels now live in SQLite
+        # rtsp_channels_enabled is legacy — channels now live in Postgres
     except Exception:
         pass
 
@@ -370,9 +391,15 @@ WEB_CONFIG = {
     'host': '0.0.0.0',  # Bind to all network interfaces for internet access
     'port': 5000,
     'debug': False,  # Disable debug mode for production
-    'secret_key': 'your-secret-key-change-this',
+    'secret_key': os.environ.get('SECRET_KEY', 'your-secret-key-change-this'),
     'max_search_results': 1000,
     'results_per_page': 1000
+}
+
+# First-boot admin (change ADMIN_PASSWORD in .env)
+AUTH_CONFIG = {
+    'admin_username': os.environ.get('ADMIN_USERNAME', 'admin').strip() or 'admin',
+    'admin_password': os.environ.get('ADMIN_PASSWORD', 'admin'),
 }
 
 # Logging Configuration

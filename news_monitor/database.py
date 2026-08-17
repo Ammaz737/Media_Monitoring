@@ -1,436 +1,404 @@
 """
-Database Models and Management for News Monitor
-Stores extracted text, audio transcriptions, and metadata
+Database models and management for News Monitor.
+PostgreSQL stores extracted text, audio transcriptions, and metadata.
 """
 
-import sqlite3
 import json
 import logging
+import subprocess
 import threading
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Tuple
+from contextlib import contextmanager
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 import uuid
 
-from config import DATABASE_CONFIG, STORAGE_CONFIG
+import psycopg2
+from psycopg2 import IntegrityError
+
+from config import BASE_DIR, DATABASE_CONFIG, STORAGE_CONFIG, AUTH_CONFIG
+
+
+def _cell(value):
+    """JSON-safe cell: keep SQLite-like timestamp strings for the frontend."""
+    if isinstance(value, datetime):
+        return value.isoformat(sep=" ")
+    if isinstance(value, date):
+        return value.isoformat()
+    return value
+
+
+def _row_dict(columns, row) -> Dict:
+    return {col: _cell(val) for col, val in zip(columns, row)}
+
+
+INITIAL_REVISION = "0001_initial"
+_migrations_applied = False
+
+
+def run_migrations(dsn: str = None) -> None:
+    """Apply Alembic migrations. Stamp existing pre-Alembic schema to 0001_initial."""
+    global _migrations_applied
+    if _migrations_applied:
+        return
+
+    from alembic import command
+    from alembic.config import Config
+
+    dsn = dsn or DATABASE_CONFIG["url"]
+    ini = Path(__file__).parent / "alembic.ini"
+    cfg = Config(str(ini))
+    cfg.set_main_option("script_location", str(Path(__file__).parent / "migrations"))
+    cfg.set_main_option("sqlalchemy.url", dsn.replace("%", "%%"))
+
+    conn = psycopg2.connect(dsn)
+    try:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = 'public' AND table_name = 'alembic_version'
+                )
+                """
+            )
+            has_alembic = cur.fetchone()[0]
+            cur.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = 'public' AND table_name = 'text_extractions'
+                )
+                """
+            )
+            has_schema = cur.fetchone()[0]
+            if has_schema and not has_alembic:
+                # Match 0001_initial indexes that older CREATE TABLE skipped
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_text_timestamp_region "
+                    "ON text_extractions(timestamp, region_name)"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_alert_severity_read "
+                    "ON alerts(severity, is_read)"
+                )
+    finally:
+        conn.close()
+
+    if has_schema and not has_alembic:
+        command.stamp(cfg, INITIAL_REVISION)
+        logging.info("Stamped existing schema as %s", INITIAL_REVISION)
+
+    command.upgrade(cfg, "head")
+    _migrations_applied = True
+    logging.info("Database migrations up to date")
+
 
 class NewsDatabase:
-    """
-    Database manager for news monitoring system
-    Handles text extractions, transcriptions, and metadata
-    """
-    
-    def __init__(self, db_path: str = None):
-        self.db_path = db_path or DATABASE_CONFIG['path']
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+    """Database manager for news monitoring system."""
+
+    def __init__(self, dsn: str = None):
+        self.dsn = dsn or DATABASE_CONFIG["url"]
         self.lock = threading.Lock()
-        
-        self._create_tables()
-        logging.info(f"Database initialized at {self.db_path}")
-    
-    def _create_tables(self):
-        """Create database tables if they don't exist"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
-            # Text extractions table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS text_extractions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    uuid TEXT UNIQUE NOT NULL,
-                    timestamp DATETIME NOT NULL,
-                    region_name TEXT NOT NULL,
-                    extracted_text TEXT NOT NULL,
-                    confidence REAL NOT NULL,
-                    priority TEXT DEFAULT 'medium',
-                    region_coords TEXT,
-                    frame_hash TEXT,
-                    screenshot_path TEXT,
-                    channel_name TEXT DEFAULT 'unknown',
-                    ocr_engine TEXT DEFAULT 'utrnet',
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            
-            # Create indices for text extractions
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_text_timestamp ON text_extractions(timestamp)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_text_region ON text_extractions(region_name)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_text_priority ON text_extractions(priority)")
-            
-            # Audio transcriptions table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS audio_transcriptions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    uuid TEXT UNIQUE NOT NULL,
-                    timestamp DATETIME NOT NULL,
-                    transcribed_text TEXT NOT NULL,
-                    confidence REAL NOT NULL,
-                    duration REAL NOT NULL,
-                    audio_path TEXT,
-                    language TEXT DEFAULT 'urdu',
-                    channel_name TEXT DEFAULT 'unknown',
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            
-            # Create indices for audio transcriptions
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_audio_timestamp ON audio_transcriptions(timestamp)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_audio_language ON audio_transcriptions(language)")
-            
-            # Alerts table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS alerts (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    uuid TEXT UNIQUE NOT NULL,
-                    timestamp DATETIME NOT NULL,
-                    alert_type TEXT NOT NULL,
-                    content_type TEXT NOT NULL,
-                    content_id TEXT NOT NULL,
-                    matched_keywords TEXT NOT NULL,
-                    alert_text TEXT NOT NULL,
-                    severity TEXT DEFAULT 'medium',
-                    is_read BOOLEAN DEFAULT FALSE,
-                    channel_name TEXT DEFAULT 'unknown',
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
+        run_migrations(self.dsn)
+        self.seed_admin_user()
+        logging.info("Database initialized (%s)", self._dsn_log)
 
-            # Migrate older DBs that lack channel_name on alerts
-            cursor.execute("PRAGMA table_info(alerts)")
-            alert_cols = {row[1] for row in cursor.fetchall()}
-            if "channel_name" not in alert_cols:
-                cursor.execute(
-                    "ALTER TABLE alerts ADD COLUMN channel_name TEXT DEFAULT 'unknown'"
-                )
-                # Backfill from linked text / audio rows when possible
-                cursor.execute(
-                    """
-                    UPDATE alerts
-                    SET channel_name = (
-                        SELECT te.channel_name FROM text_extractions te
-                        WHERE te.uuid = alerts.content_id
-                    )
-                    WHERE content_type = 'text'
-                      AND (channel_name IS NULL OR channel_name = '' OR channel_name = 'unknown')
-                      AND EXISTS (
-                          SELECT 1 FROM text_extractions te
-                          WHERE te.uuid = alerts.content_id AND te.channel_name IS NOT NULL
-                      )
-                    """
-                )
-                cursor.execute(
-                    """
-                    UPDATE alerts
-                    SET channel_name = (
-                        SELECT at.channel_name FROM audio_transcriptions at
-                        WHERE at.uuid = alerts.content_id
-                    )
-                    WHERE content_type = 'audio'
-                      AND (channel_name IS NULL OR channel_name = '' OR channel_name = 'unknown')
-                      AND EXISTS (
-                          SELECT 1 FROM audio_transcriptions at
-                          WHERE at.uuid = alerts.content_id AND at.channel_name IS NOT NULL
-                      )
-                    """
-                )
-            
-            # OCR engine tag (utrnet | ollama) for dashboard badges
-            cursor.execute("PRAGMA table_info(text_extractions)")
-            text_cols = {row[1] for row in cursor.fetchall()}
-            if "ocr_engine" not in text_cols:
-                cursor.execute(
-                    "ALTER TABLE text_extractions ADD COLUMN ocr_engine TEXT DEFAULT 'utrnet'"
-                )
+    @property
+    def _dsn_log(self) -> str:
+        """DSN with password stripped for logs."""
+        url = self.dsn
+        if "@" in url and ":" in url.split("@", 1)[0]:
+            head, tail = url.rsplit("@", 1)
+            scheme_user, _, _pw = head.rpartition(":")
+            return f"{scheme_user}:***@{tail}"
+        return url
 
-            # Create indices for alerts
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_type ON alerts(alert_type)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_read ON alerts(is_read)")
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_alerts_channel ON alerts(channel_name)"
-            )
-            
-            # Channel metadata table (source of truth for RTSP stream configs)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS channels (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    channel_name TEXT UNIQUE NOT NULL,
-                    rtsp_url TEXT,
-                    display_name TEXT,
-                    language TEXT DEFAULT 'urdu',
-                    is_active BOOLEAN DEFAULT TRUE,
-                    priority TEXT DEFAULT 'medium',
-                    last_seen DATETIME,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            # Migrate older DBs that lack priority / text_regions
-            cursor.execute("PRAGMA table_info(channels)")
-            channel_cols = {row[1] for row in cursor.fetchall()}
-            if 'priority' not in channel_cols:
-                cursor.execute(
-                    "ALTER TABLE channels ADD COLUMN priority TEXT DEFAULT 'medium'"
-                )
-            if 'text_regions' not in channel_cols:
-                cursor.execute(
-                    "ALTER TABLE channels ADD COLUMN text_regions TEXT"
-                )
+    @contextmanager
+    def _cursor(self):
+        conn = psycopg2.connect(self.dsn)
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    yield cur
+        finally:
+            conn.close()
 
-            # Statistics table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS daily_stats (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    date DATE NOT NULL,
-                    channel_name TEXT NOT NULL,
-                    text_extractions_count INTEGER DEFAULT 0,
-                    audio_transcriptions_count INTEGER DEFAULT 0,
-                    alerts_count INTEGER DEFAULT 0,
-                    processing_time_avg REAL DEFAULT 0,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(date, channel_name)
-                )
-            """)
-            
-            conn.commit()
-    
-    def insert_text_extraction(self, 
-                             region_name: str,
-                             text: str,
-                             confidence: float,
-                             priority: str = 'medium',
-                             region_coords: Tuple[int, int, int, int] = None,
-                             frame_hash: str = None,
-                             screenshot_path: str = None,
-                             channel_name: str = 'unknown',
-                             ocr_engine: str = 'utrnet') -> str:
-        """
-        Insert a text extraction record
-        
-        Returns:
-            UUID of the inserted record
-        """
+    def insert_text_extraction(
+        self,
+        region_name: str,
+        text: str,
+        confidence: float,
+        priority: str = "medium",
+        region_coords: Tuple[int, int, int, int] = None,
+        frame_hash: str = None,
+        screenshot_path: str = None,
+        channel_name: str = "unknown",
+        ocr_engine: str = "utrnet",
+    ) -> str:
         record_uuid = str(uuid.uuid4())
         timestamp = datetime.now()
-        engine = (ocr_engine or 'utrnet').strip().lower()
-        if engine not in ('utrnet', 'ollama'):
-            engine = 'utrnet'
-        
+        engine = (ocr_engine or "utrnet").strip().lower()
+        if engine not in ("utrnet", "ollama"):
+            engine = "utrnet"
+
         with self.lock:
             try:
-                with sqlite3.connect(self.db_path) as conn:
-                    cursor = conn.cursor()
-                    
-                    cursor.execute("""
-                        INSERT INTO text_extractions 
-                        (uuid, timestamp, region_name, extracted_text, confidence, 
+                with self._cursor() as cursor:
+                    cursor.execute(
+                        """
+                        INSERT INTO text_extractions
+                        (uuid, timestamp, region_name, extracted_text, confidence,
                          priority, region_coords, frame_hash, screenshot_path, channel_name,
                          ocr_engine)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        record_uuid, timestamp, region_name, text, confidence,
-                        priority, json.dumps(region_coords) if region_coords else None,
-                        frame_hash, screenshot_path, channel_name, engine
-                    ))
-                    
-                    conn.commit()
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            record_uuid,
+                            timestamp,
+                            region_name,
+                            text,
+                            confidence,
+                            priority,
+                            json.dumps(region_coords) if region_coords else None,
+                            frame_hash,
+                            screenshot_path,
+                            channel_name,
+                            engine,
+                        ),
+                    )
                     return record_uuid
-                    
             except Exception as e:
-                logging.error(f"Error inserting text extraction: {e}")
+                logging.error("Error inserting text extraction: %s", e)
                 return None
-    
-    def insert_audio_transcription(self,
-                                 text: str,
-                                 confidence: float,
-                                 duration: float,
-                                 audio_path: str = None,
-                                 language: str = 'urdu',
-                                 channel_name: str = 'unknown',
-                                 record_uuid: str = None,
-                                 timestamp: datetime = None) -> str:
-        """
-        Insert an audio transcription record
-        
-        Returns:
-            UUID of the inserted record
-        """
+
+    def insert_audio_transcription(
+        self,
+        text: str,
+        confidence: float,
+        duration: float,
+        audio_path: str = None,
+        language: str = "urdu",
+        channel_name: str = "unknown",
+        record_uuid: str = None,
+        timestamp: datetime = None,
+    ) -> str:
         record_uuid = record_uuid or str(uuid.uuid4())
         timestamp = timestamp or datetime.now()
-        
+
         with self.lock:
             try:
-                with sqlite3.connect(self.db_path) as conn:
-                    cursor = conn.cursor()
-                    
-                    cursor.execute("""
-                        INSERT INTO audio_transcriptions 
+                with self._cursor() as cursor:
+                    cursor.execute(
+                        """
+                        INSERT INTO audio_transcriptions
                         (uuid, timestamp, transcribed_text, confidence, duration,
                          audio_path, language, channel_name)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        record_uuid, timestamp, text, confidence, duration,
-                        audio_path, language, channel_name
-                    ))
-                    
-                    conn.commit()
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            record_uuid,
+                            timestamp,
+                            text,
+                            confidence,
+                            duration,
+                            audio_path,
+                            language,
+                            channel_name,
+                        ),
+                    )
                     return record_uuid
-                    
             except Exception as e:
-                logging.error(f"Error inserting audio transcription: {e}")
+                logging.error("Error inserting audio transcription: %s", e)
                 return None
-    
-    def insert_alert(self,
-                     alert_type: str,
-                     content_type: str,
-                     content_id: str,
-                     matched_keywords: List[str],
-                     alert_text: str,
-                     severity: str = 'medium',
-                     channel_name: str = 'unknown') -> str:
-        """
-        Insert an alert record
-        
-        Returns:
-            UUID of the inserted record
-        """
+
+    def insert_alert(
+        self,
+        alert_type: str,
+        content_type: str,
+        content_id: str,
+        matched_keywords: List[str],
+        alert_text: str,
+        severity: str = "medium",
+        channel_name: str = "unknown",
+    ) -> str:
         record_uuid = str(uuid.uuid4())
         timestamp = datetime.now()
-        
+
         with self.lock:
             try:
-                with sqlite3.connect(self.db_path) as conn:
-                    cursor = conn.cursor()
-                    
-                    cursor.execute("""
-                        INSERT INTO alerts 
+                with self._cursor() as cursor:
+                    cursor.execute(
+                        """
+                        INSERT INTO alerts
                         (uuid, timestamp, alert_type, content_type, content_id,
                          matched_keywords, alert_text, severity, channel_name)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        record_uuid, timestamp, alert_type, content_type, content_id,
-                        json.dumps(matched_keywords), alert_text, severity,
-                        channel_name or 'unknown',
-                    ))
-                    
-                    conn.commit()
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            record_uuid,
+                            timestamp,
+                            alert_type,
+                            content_type,
+                            content_id,
+                            json.dumps(matched_keywords),
+                            alert_text,
+                            severity,
+                            channel_name or "unknown",
+                        ),
+                    )
                     return record_uuid
-                    
             except Exception as e:
-                logging.error(f"Error inserting alert: {e}")
+                logging.error("Error inserting alert: %s", e)
                 return None
-    
-    def search_text_extractions(self,
-                              query: str = None,
-                              start_date: datetime = None,
-                              end_date: datetime = None,
-                              region_name: str = None,
-                              channel_name: str = None,
-                              min_confidence: float = None,
-                              limit: int = 100) -> List[Dict]:
-        """Search text extractions with filters"""
-        
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
+
+    def search_text_extractions(
+        self,
+        query: str = None,
+        start_date: datetime = None,
+        end_date: datetime = None,
+        region_name: str = None,
+        channel_name: str = None,
+        min_confidence: float = None,
+        limit: int = 100,
+    ) -> List[Dict]:
+        with self._cursor() as cursor:
             sql = "SELECT * FROM text_extractions WHERE 1=1"
-            params = []
-            
+            params: list = []
+
             if query:
-                sql += " AND extracted_text LIKE ?"
+                sql += " AND extracted_text LIKE %s"
                 params.append(f"%{query}%")
-            
             if start_date:
-                sql += " AND timestamp >= ?"
+                sql += " AND timestamp >= %s"
                 params.append(start_date)
-            
             if end_date:
-                sql += " AND timestamp <= ?"
+                sql += " AND timestamp <= %s"
                 params.append(end_date)
-            
             if region_name:
-                sql += " AND region_name = ?"
+                sql += " AND region_name = %s"
                 params.append(region_name)
-            
             if channel_name:
-                sql += " AND channel_name = ?"
+                sql += " AND channel_name = %s"
                 params.append(channel_name)
-            
             if min_confidence:
-                sql += " AND confidence >= ?"
+                sql += " AND confidence >= %s"
                 params.append(min_confidence)
-            
-            sql += " ORDER BY timestamp DESC LIMIT ?"
+
+            sql += " ORDER BY timestamp DESC LIMIT %s"
             params.append(limit)
-            
+
             cursor.execute(sql, params)
-            
             columns = [desc[0] for desc in cursor.description]
             results = []
-            
             for row in cursor.fetchall():
-                record = dict(zip(columns, row))
-                # Parse JSON fields
-                if record['region_coords']:
-                    record['region_coords'] = json.loads(record['region_coords'])
+                record = _row_dict(columns, row)
+                if record["region_coords"]:
+                    record["region_coords"] = json.loads(record["region_coords"])
                 results.append(record)
-            
             return results
-    
-    def search_audio_transcriptions(self,
-                                  query: str = None,
-                                  start_date: datetime = None,
-                                  end_date: datetime = None,
-                                  channel_name: str = None,
-                                  min_confidence: float = None,
-                                  limit: int = 100) -> List[Dict]:
-        """Search audio transcriptions with filters"""
-        
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
+
+    def search_audio_transcriptions(
+        self,
+        query: str = None,
+        start_date: datetime = None,
+        end_date: datetime = None,
+        channel_name: str = None,
+        min_confidence: float = None,
+        limit: int = 100,
+    ) -> List[Dict]:
+        with self._cursor() as cursor:
             sql = "SELECT * FROM audio_transcriptions WHERE 1=1"
-            params = []
-            
+            params: list = []
+
             if query:
-                sql += " AND transcribed_text LIKE ?"
+                sql += " AND transcribed_text LIKE %s"
                 params.append(f"%{query}%")
-            
             if start_date:
-                sql += " AND timestamp >= ?"
+                sql += " AND timestamp >= %s"
                 params.append(start_date)
-            
             if end_date:
-                sql += " AND timestamp <= ?"
+                sql += " AND timestamp <= %s"
                 params.append(end_date)
-            
             if channel_name:
-                sql += " AND channel_name = ?"
+                sql += " AND channel_name = %s"
                 params.append(channel_name)
-            
             if min_confidence:
-                sql += " AND confidence >= ?"
+                sql += " AND confidence >= %s"
                 params.append(min_confidence)
-            
-            sql += " ORDER BY timestamp DESC LIMIT ?"
+
+            sql += " ORDER BY timestamp DESC LIMIT %s"
             params.append(limit)
-            
+
             cursor.execute(sql, params)
-            
             columns = [desc[0] for desc in cursor.description]
-            results = [dict(zip(columns, row)) for row in cursor.fetchall()]
-            
-            return results
-    
-    def get_alerts(self,
-                   is_read: bool = None,
-                   alert_type: str = None,
-                   severity: str = None,
-                   limit: int = 1000) -> List[Dict]:
-        """Get alerts with filters"""
-        
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
+            return [_row_dict(columns, row) for row in cursor.fetchall()]
+
+    def paginate_text_extractions(self, page: int = 1, per_page: int = 50) -> Dict:
+        page = max(1, int(page or 1))
+        per_page = min(max(1, int(per_page or 50)), 100)
+        offset = (page - 1) * per_page
+        with self._cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) FROM text_extractions")
+            total = cursor.fetchone()[0]
+            cursor.execute(
+                """
+                SELECT uuid, timestamp, region_name, extracted_text, confidence,
+                       priority, screenshot_path, channel_name
+                FROM text_extractions
+                ORDER BY timestamp DESC
+                LIMIT %s OFFSET %s
+                """,
+                (per_page, offset),
+            )
+            columns = [desc[0] for desc in cursor.description]
+            results = [_row_dict(columns, row) for row in cursor.fetchall()]
+        total_pages = (total + per_page - 1) // per_page if per_page else 0
+        return {
+            "results": results,
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "total_pages": total_pages,
+        }
+
+    def paginate_audio_transcriptions(self, page: int = 1, per_page: int = 50) -> Dict:
+        page = max(1, int(page or 1))
+        per_page = min(max(1, int(per_page or 50)), 100)
+        offset = (page - 1) * per_page
+        with self._cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) FROM audio_transcriptions")
+            total = cursor.fetchone()[0]
+            cursor.execute(
+                """
+                SELECT uuid, timestamp, transcribed_text, confidence,
+                       duration, language, channel_name
+                FROM audio_transcriptions
+                ORDER BY timestamp DESC
+                LIMIT %s OFFSET %s
+                """,
+                (per_page, offset),
+            )
+            columns = [desc[0] for desc in cursor.description]
+            results = [_row_dict(columns, row) for row in cursor.fetchall()]
+        total_pages = (total + per_page - 1) // per_page if per_page else 0
+        return {
+            "results": results,
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "total_pages": total_pages,
+        }
+
+    def get_alerts(
+        self,
+        is_read: bool = None,
+        alert_type: str = None,
+        severity: str = None,
+        limit: int = 1000,
+    ) -> List[Dict]:
+        with self._cursor() as cursor:
             sql = """
                 SELECT a.*,
                        te.screenshot_path,
@@ -444,218 +412,198 @@ class NewsDatabase:
                    AND a.content_type = 'audio'
                 WHERE 1=1
             """
-            params = []
-            
+            params: list = []
+
             if is_read is not None:
-                sql += " AND a.is_read = ?"
+                sql += " AND a.is_read = %s"
                 params.append(is_read)
-            
             if alert_type:
-                sql += " AND a.alert_type = ?"
+                sql += " AND a.alert_type = %s"
                 params.append(alert_type)
-            
             if severity:
-                sql += " AND a.severity = ?"
+                sql += " AND a.severity = %s"
                 params.append(severity)
-            
-            sql += " ORDER BY a.timestamp DESC LIMIT ?"
+
+            sql += " ORDER BY a.timestamp DESC LIMIT %s"
             params.append(max(1, min(int(limit or 1000), 5000)))
-            
+
             cursor.execute(sql, params)
-            
             columns = [desc[0] for desc in cursor.description]
             results = []
-            
             for row in cursor.fetchall():
-                record = dict(zip(columns, row))
-                # Parse JSON fields
-                if record['matched_keywords']:
-                    record['matched_keywords'] = json.loads(record['matched_keywords'])
+                record = _row_dict(columns, row)
+                if record["matched_keywords"]:
+                    record["matched_keywords"] = json.loads(record["matched_keywords"])
                 results.append(record)
-            
             return results
 
     def get_alert_counts(self) -> Dict[str, int]:
-        """Total / unread / read alert counts (not limited by page size)."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        with self._cursor() as cursor:
             cursor.execute("SELECT COUNT(*) FROM alerts")
             total = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM alerts WHERE is_read = 0 OR is_read = FALSE")
+            cursor.execute("SELECT COUNT(*) FROM alerts WHERE is_read = FALSE")
             unread = cursor.fetchone()[0]
             return {
-                'total': total,
-                'unread': unread,
-                'read': max(0, total - unread),
+                "total": total,
+                "unread": unread,
+                "read": max(0, total - unread),
             }
 
     def mark_all_alerts_read(self) -> int:
-        """Mark every unread alert as read. Returns rows updated."""
         with self.lock:
             try:
-                with sqlite3.connect(self.db_path) as conn:
-                    cursor = conn.cursor()
+                with self._cursor() as cursor:
                     cursor.execute(
                         """
                         UPDATE alerts
                         SET is_read = TRUE
-                        WHERE is_read = 0 OR is_read = FALSE
+                        WHERE is_read = FALSE
                         """
                     )
-                    conn.commit()
                     return cursor.rowcount
             except Exception as e:
-                logging.error(f"Error marking all alerts read: {e}")
+                logging.error("Error marking all alerts read: %s", e)
                 return 0
-    
+
     def mark_alert_read(self, alert_uuid: str) -> bool:
-        """Mark an alert as read"""
-        
         with self.lock:
             try:
-                with sqlite3.connect(self.db_path) as conn:
-                    cursor = conn.cursor()
-                    
-                    cursor.execute("""
-                        UPDATE alerts SET is_read = TRUE 
-                        WHERE uuid = ?
-                    """, (alert_uuid,))
-                    
-                    conn.commit()
+                with self._cursor() as cursor:
+                    cursor.execute(
+                        "UPDATE alerts SET is_read = TRUE WHERE uuid = %s",
+                        (alert_uuid,),
+                    )
                     return cursor.rowcount > 0
-                    
             except Exception as e:
-                logging.error(f"Error marking alert as read: {e}")
+                logging.error("Error marking alert as read: %s", e)
                 return False
-    
+
     def _get_daily_activity_series(self, cursor, days: int = 14) -> List[Dict]:
-        """Daily extraction/transcription counts for chart (fills last N days)."""
         cursor.execute(
             """
-            SELECT date(timestamp) AS day, COUNT(*) AS cnt
+            SELECT timestamp::date AS day, COUNT(*) AS cnt
             FROM text_extractions
-            WHERE timestamp >= date('now', ?)
-            GROUP BY date(timestamp)
+            WHERE timestamp >= CURRENT_DATE - (%s * INTERVAL '1 day')
+            GROUP BY timestamp::date
             """,
-            (f'-{days} day',),
+            (days,),
         )
-        text_by_day = {row[0]: row[1] for row in cursor.fetchall()}
+        text_by_day = {str(row[0]): row[1] for row in cursor.fetchall()}
 
         cursor.execute(
             """
-            SELECT date(timestamp) AS day, COUNT(*) AS cnt
+            SELECT timestamp::date AS day, COUNT(*) AS cnt
             FROM audio_transcriptions
-            WHERE timestamp >= date('now', ?)
-            GROUP BY date(timestamp)
+            WHERE timestamp >= CURRENT_DATE - (%s * INTERVAL '1 day')
+            GROUP BY timestamp::date
             """,
-            (f'-{days} day',),
+            (days,),
         )
-        audio_by_day = {row[0]: row[1] for row in cursor.fetchall()}
+        audio_by_day = {str(row[0]): row[1] for row in cursor.fetchall()}
 
         series = []
         today = datetime.now().date()
         for offset in range(days - 1, -1, -1):
             day = (today - timedelta(days=offset)).isoformat()
-            series.append({
-                'time': day,
-                'extractions': text_by_day.get(day, 0),
-                'transcriptions': audio_by_day.get(day, 0),
-            })
+            series.append(
+                {
+                    "time": day,
+                    "extractions": text_by_day.get(day, 0),
+                    "transcriptions": audio_by_day.get(day, 0),
+                }
+            )
         return series
 
-    def get_statistics(self, 
-                      start_date: datetime = None, 
-                      end_date: datetime = None) -> Dict:
-        """Get system statistics"""
-        
+    def get_statistics(
+        self, start_date: datetime = None, end_date: datetime = None
+    ) -> Dict:
         period_start = start_date or (datetime.now() - timedelta(days=7))
         period_end = end_date or datetime.now()
-        
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
-            # All-time totals (used by dashboard stat cards)
+
+        with self._cursor() as cursor:
             cursor.execute("SELECT COUNT(*) FROM text_extractions")
             text_count = cursor.fetchone()[0]
-            
+
             cursor.execute("SELECT COUNT(*) FROM audio_transcriptions")
             audio_count = cursor.fetchone()[0]
-            
+
             cursor.execute("SELECT COUNT(*) FROM alerts")
             alerts_count = cursor.fetchone()[0]
-            
-            cursor.execute("""
-                SELECT COUNT(*) FROM alerts 
-                WHERE is_read = FALSE
-            """)
+
+            cursor.execute("SELECT COUNT(*) FROM alerts WHERE is_read = FALSE")
             unread_alerts = cursor.fetchone()[0]
-            
-            # Period-filtered counts (optional / analytics)
-            cursor.execute("""
-                SELECT COUNT(*) FROM text_extractions 
-                WHERE timestamp BETWEEN ? AND ?
-            """, (period_start, period_end))
+
+            cursor.execute(
+                """
+                SELECT COUNT(*) FROM text_extractions
+                WHERE timestamp BETWEEN %s AND %s
+                """,
+                (period_start, period_end),
+            )
             text_count_period = cursor.fetchone()[0]
-            
-            cursor.execute("""
-                SELECT COUNT(*) FROM audio_transcriptions 
-                WHERE timestamp BETWEEN ? AND ?
-            """, (period_start, period_end))
+
+            cursor.execute(
+                """
+                SELECT COUNT(*) FROM audio_transcriptions
+                WHERE timestamp BETWEEN %s AND %s
+                """,
+                (period_start, period_end),
+            )
             audio_count_period = cursor.fetchone()[0]
-            
-            cursor.execute("""
-                SELECT COUNT(*) FROM alerts 
-                WHERE timestamp BETWEEN ? AND ?
-            """, (period_start, period_end))
+
+            cursor.execute(
+                """
+                SELECT COUNT(*) FROM alerts
+                WHERE timestamp BETWEEN %s AND %s
+                """,
+                (period_start, period_end),
+            )
             alerts_count_period = cursor.fetchone()[0]
-            
-            # Recent activity (last 24 hours)
+
             recent_time = datetime.now() - timedelta(hours=24)
-            cursor.execute("""
-                SELECT COUNT(*) FROM text_extractions 
-                WHERE timestamp > ?
-            """, (recent_time,))
+            cursor.execute(
+                "SELECT COUNT(*) FROM text_extractions WHERE timestamp > %s",
+                (recent_time,),
+            )
             recent_text = cursor.fetchone()[0]
-            
-            cursor.execute("""
-                SELECT COUNT(*) FROM audio_transcriptions 
-                WHERE timestamp > ?
-            """, (recent_time,))
+
+            cursor.execute(
+                "SELECT COUNT(*) FROM audio_transcriptions WHERE timestamp > %s",
+                (recent_time,),
+            )
             recent_audio = cursor.fetchone()[0]
 
             chart_series = self._get_daily_activity_series(cursor)
-            
+
             return {
-                'period': {
-                    'start': period_start.isoformat(),
-                    'end': period_end.isoformat()
+                "period": {
+                    "start": period_start.isoformat(),
+                    "end": period_end.isoformat(),
                 },
-                'totals': {
-                    'text_extractions': text_count,
-                    'audio_transcriptions': audio_count,
-                    'alerts': alerts_count,
-                    'unread_alerts': unread_alerts
+                "totals": {
+                    "text_extractions": text_count,
+                    "audio_transcriptions": audio_count,
+                    "alerts": alerts_count,
+                    "unread_alerts": unread_alerts,
                 },
-                'period_totals': {
-                    'text_extractions': text_count_period,
-                    'audio_transcriptions': audio_count_period,
-                    'alerts': alerts_count_period,
+                "period_totals": {
+                    "text_extractions": text_count_period,
+                    "audio_transcriptions": audio_count_period,
+                    "alerts": alerts_count_period,
                 },
-                'recent_activity': {
-                    'text_extractions_24h': recent_text,
-                    'audio_transcriptions_24h': recent_audio
+                "recent_activity": {
+                    "text_extractions_24h": recent_text,
+                    "audio_transcriptions_24h": recent_audio,
                 },
-                'chart_series': chart_series,
+                "chart_series": chart_series,
             }
 
     def seed_rtsp_channels(self, defaults: Dict) -> int:
-        """Insert default RTSP channels when the table is empty. Returns rows inserted."""
         if not defaults:
             return 0
         with self.lock:
             try:
-                with sqlite3.connect(self.db_path) as conn:
-                    cursor = conn.cursor()
+                with self._cursor() as cursor:
                     cursor.execute("SELECT COUNT(*) FROM channels")
                     if cursor.fetchone()[0] > 0:
                         return 0
@@ -665,28 +613,25 @@ class NewsDatabase:
                             """
                             INSERT INTO channels
                             (channel_name, rtsp_url, display_name, is_active, priority)
-                            VALUES (?, ?, ?, ?, ?)
+                            VALUES (%s, %s, %s, %s, %s)
                             """,
                             (
                                 channel_id,
-                                cfg.get('rtsp_url') or '',
-                                cfg.get('name') or channel_id,
-                                1 if cfg.get('enabled', True) else 0,
-                                cfg.get('priority') or 'medium',
+                                cfg.get("rtsp_url") or "",
+                                cfg.get("name") or channel_id,
+                                bool(cfg.get("enabled", True)),
+                                cfg.get("priority") or "medium",
                             ),
                         )
                         inserted += 1
-                    conn.commit()
                     logging.info("Seeded %s RTSP channels into database", inserted)
                     return inserted
             except Exception as e:
-                logging.error(f"Error seeding RTSP channels: {e}")
+                logging.error("Error seeding RTSP channels: %s", e)
                 return 0
 
     def get_rtsp_channels(self) -> Dict[str, Dict]:
-        """Load RTSP channel configs keyed by channel_name (id)."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        with self._cursor() as cursor:
             cursor.execute(
                 """
                 SELECT channel_name, display_name, rtsp_url, is_active, priority, text_regions
@@ -706,11 +651,11 @@ class NewsDatabase:
                     except Exception:
                         regions = None
                 channels[cid] = {
-                    'name': display_name or cid,
-                    'rtsp_url': rtsp_url or '',
-                    'enabled': bool(is_active),
-                    'priority': priority or 'medium',
-                    'text_regions': regions,
+                    "name": display_name or cid,
+                    "rtsp_url": rtsp_url or "",
+                    "enabled": bool(is_active),
+                    "priority": priority or "medium",
+                    "text_regions": regions,
                 }
             return channels
 
@@ -720,14 +665,12 @@ class NewsDatabase:
         name: str,
         rtsp_url: str,
         enabled: bool = True,
-        priority: str = 'medium',
+        priority: str = "medium",
         text_regions: Dict = None,
     ) -> bool:
-        """Insert a new RTSP channel. Returns False if id already exists."""
         with self.lock:
             try:
-                with sqlite3.connect(self.db_path) as conn:
-                    cursor = conn.cursor()
+                with self._cursor() as cursor:
                     regions_json = (
                         json.dumps(text_regions, ensure_ascii=False)
                         if text_regions
@@ -737,23 +680,22 @@ class NewsDatabase:
                         """
                         INSERT INTO channels
                         (channel_name, rtsp_url, display_name, is_active, priority, text_regions)
-                        VALUES (?, ?, ?, ?, ?, ?)
+                        VALUES (%s, %s, %s, %s, %s, %s)
                         """,
                         (
                             channel_id,
                             rtsp_url,
                             name,
-                            1 if enabled else 0,
-                            priority or 'medium',
+                            bool(enabled),
+                            priority or "medium",
                             regions_json,
                         ),
                     )
-                    conn.commit()
                     return True
-            except sqlite3.IntegrityError:
+            except IntegrityError:
                 return False
             except Exception as e:
-                logging.error(f"Error creating RTSP channel: {e}")
+                logging.error("Error creating RTSP channel: %s", e)
                 return False
 
     def update_rtsp_channel(
@@ -767,15 +709,13 @@ class NewsDatabase:
         text_regions: Dict = None,
         clear_text_regions: bool = False,
     ) -> bool:
-        """Update fields on an existing RTSP channel."""
         with self.lock:
             try:
-                with sqlite3.connect(self.db_path) as conn:
-                    cursor = conn.cursor()
+                with self._cursor() as cursor:
                     cursor.execute(
                         """
                         SELECT display_name, rtsp_url, is_active, priority, text_regions
-                        FROM channels WHERE channel_name = ?
+                        FROM channels WHERE channel_name = %s
                         """,
                         (channel_id,),
                     )
@@ -785,7 +725,7 @@ class NewsDatabase:
                     cur_name, cur_url, cur_active, cur_priority, cur_regions = row
                     new_name = name if name is not None else cur_name
                     new_url = rtsp_url if rtsp_url is not None else cur_url
-                    new_active = (1 if enabled else 0) if enabled is not None else cur_active
+                    new_active = bool(enabled) if enabled is not None else cur_active
                     new_priority = priority if priority is not None else cur_priority
                     if clear_text_regions:
                         new_regions = None
@@ -796,45 +736,39 @@ class NewsDatabase:
                     cursor.execute(
                         """
                         UPDATE channels
-                        SET display_name = ?, rtsp_url = ?, is_active = ?, priority = ?,
-                            text_regions = ?
-                        WHERE channel_name = ?
+                        SET display_name = %s, rtsp_url = %s, is_active = %s, priority = %s,
+                            text_regions = %s
+                        WHERE channel_name = %s
                         """,
                         (
                             new_name,
                             new_url,
                             new_active,
-                            new_priority or 'medium',
+                            new_priority or "medium",
                             new_regions,
                             channel_id,
                         ),
                     )
-                    conn.commit()
                     return cursor.rowcount > 0
             except Exception as e:
-                logging.error(f"Error updating RTSP channel {channel_id}: {e}")
+                logging.error("Error updating RTSP channel %s: %s", channel_id, e)
                 return False
 
     def delete_rtsp_channel(self, channel_id: str) -> bool:
-        """Delete an RTSP channel by id."""
         with self.lock:
             try:
-                with sqlite3.connect(self.db_path) as conn:
-                    cursor = conn.cursor()
+                with self._cursor() as cursor:
                     cursor.execute(
-                        "DELETE FROM channels WHERE channel_name = ?",
+                        "DELETE FROM channels WHERE channel_name = %s",
                         (channel_id,),
                     )
-                    conn.commit()
                     return cursor.rowcount > 0
             except Exception as e:
-                logging.error(f"Error deleting RTSP channel {channel_id}: {e}")
+                logging.error("Error deleting RTSP channel: %s", e)
                 return False
 
-    def next_rtsp_channel_id(self, prefix: str = 'channel_') -> str:
-        """Allocate next unused channel_N id."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
+    def next_rtsp_channel_id(self, prefix: str = "channel_") -> str:
+        with self._cursor() as cursor:
             cursor.execute("SELECT channel_name FROM channels")
             existing = {row[0] for row in cursor.fetchall()}
         n = 1
@@ -843,9 +777,7 @@ class NewsDatabase:
         return f"{prefix}{n}"
 
     def get_search_facets(self) -> Dict:
-        """Distinct channel/region values for search filters."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        with self._cursor() as cursor:
             cursor.execute(
                 """
                 SELECT DISTINCT channel_name FROM text_extractions
@@ -872,151 +804,327 @@ class NewsDatabase:
                 """
             )
             regions = [row[0] for row in cursor.fetchall()]
-            return {'channels': channels, 'regions': regions}
+            return {"channels": channels, "regions": regions}
 
     def rescan_alerts_for_keywords(
         self,
         keywords: List[str],
         limit: int = 200,
     ) -> int:
-        """Create alerts for recent text that matches current keywords."""
         if not keywords:
             return 0
 
         created = 0
         rows = self.search_text_extractions(limit=limit)
         for row in rows:
-            text = row.get('extracted_text') or ''
+            text = row.get("extracted_text") or ""
             if not text:
                 continue
             matched = []
             text_l = text.lower()
             for kw in keywords:
-                kw_s = (kw or '').strip()
+                kw_s = (kw or "").strip()
                 if not kw_s:
                     continue
-                # Arabic/Urdu: case-folding is a no-op; English: lower both
-                if any('\u0600' <= ch <= '\u06FF' for ch in kw_s):
+                if any("\u0600" <= ch <= "\u06FF" for ch in kw_s):
                     if kw_s in text:
                         matched.append(kw_s)
                 elif kw_s.lower() in text_l:
                     matched.append(kw_s)
             if not matched:
                 continue
-            # Avoid duplicate alerts for same content + same keyword set
-            content_id = row.get('uuid')
+            content_id = row.get("uuid")
             if not content_id:
                 continue
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
+            with self._cursor() as cursor:
                 cursor.execute(
                     """
                     SELECT COUNT(*) FROM alerts
-                    WHERE content_id = ? AND alert_type = 'keyword_match'
+                    WHERE content_id = %s AND alert_type = 'keyword_match'
                     """,
                     (content_id,),
                 )
                 if cursor.fetchone()[0] > 0:
                     continue
             alert_uuid = self.insert_alert(
-                alert_type='keyword_match',
-                content_type='text',
+                alert_type="keyword_match",
+                content_type="text",
                 content_id=content_id,
                 matched_keywords=matched,
                 alert_text=text[:500],
-                severity='high' if any(kw in ['عاجل', 'breaking'] for kw in matched) else 'medium',
-                channel_name=row.get('channel_name') or 'unknown',
+                severity="high"
+                if any(kw in ["عاجل", "breaking"] for kw in matched)
+                else "medium",
+                channel_name=row.get("channel_name") or "unknown",
             )
             if alert_uuid:
                 created += 1
         return created
-    
+
     def cleanup_old_data(self, days_to_keep: int = None):
-        """Clean up old data based on retention policy"""
-        
         if days_to_keep is None:
-            days_to_keep = STORAGE_CONFIG['max_storage_days']
-        
+            days_to_keep = STORAGE_CONFIG["max_storage_days"]
+
         cutoff_date = datetime.now() - timedelta(days=days_to_keep)
-        
+
         with self.lock:
             try:
-                with sqlite3.connect(self.db_path) as conn:
-                    cursor = conn.cursor()
-                    
-                    # Clean up text extractions
-                    cursor.execute("""
-                        DELETE FROM text_extractions 
-                        WHERE timestamp < ?
-                    """, (cutoff_date,))
+                with self._cursor() as cursor:
+                    cursor.execute(
+                        "DELETE FROM text_extractions WHERE timestamp < %s",
+                        (cutoff_date,),
+                    )
                     deleted_text = cursor.rowcount
-                    
-                    # Clean up audio transcriptions
-                    cursor.execute("""
-                        DELETE FROM audio_transcriptions 
-                        WHERE timestamp < ?
-                    """, (cutoff_date,))
+
+                    cursor.execute(
+                        "DELETE FROM audio_transcriptions WHERE timestamp < %s",
+                        (cutoff_date,),
+                    )
                     deleted_audio = cursor.rowcount
-                    
-                    # Clean up old alerts (keep for longer)
+
                     alert_cutoff = datetime.now() - timedelta(days=days_to_keep * 2)
-                    cursor.execute("""
-                        DELETE FROM alerts 
-                        WHERE timestamp < ? AND is_read = TRUE
-                    """, (alert_cutoff,))
+                    cursor.execute(
+                        """
+                        DELETE FROM alerts
+                        WHERE timestamp < %s AND is_read = TRUE
+                        """,
+                        (alert_cutoff,),
+                    )
                     deleted_alerts = cursor.rowcount
-                    
-                    conn.commit()
-                    
-                    logging.info(f"Cleaned up old data: {deleted_text} texts, "
-                               f"{deleted_audio} audio, {deleted_alerts} alerts")
-                    
+
+                    logging.info(
+                        "Cleaned up old data: %s texts, %s audio, %s alerts",
+                        deleted_text,
+                        deleted_audio,
+                        deleted_alerts,
+                    )
             except Exception as e:
-                logging.error(f"Error during cleanup: {e}")
-    
+                logging.error("Error during cleanup: %s", e)
+
     def backup_database(self, backup_path: str = None):
-        """Create a backup of the database"""
-        
         if not backup_path:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_path = self.db_path.parent / f"news_monitor_backup_{timestamp}.db"
-        
+            backup_path = BASE_DIR / "data" / f"news_monitor_backup_{timestamp}.sql"
+        backup_path = Path(backup_path)
+        backup_path.parent.mkdir(parents=True, exist_ok=True)
+
         try:
-            with sqlite3.connect(self.db_path) as source:
-                with sqlite3.connect(backup_path) as backup:
-                    source.backup(backup)
-            
-            logging.info(f"Database backed up to {backup_path}")
+            subprocess.run(
+                ["pg_dump", "--dbname", self.dsn, "-f", str(backup_path)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            logging.info("Database backed up to %s", backup_path)
             return backup_path
-            
         except Exception as e:
-            logging.error(f"Error creating backup: {e}")
+            logging.error("Error creating backup: %s", e)
             return None
-    
+
     def close(self):
-        """Close database connections"""
-        # SQLite connections are automatically closed when going out of scope
         logging.info("Database connections closed")
 
+    def seed_admin_user(self) -> None:
+        """Create the default admin if the users table is empty."""
+        from auth import hash_password
 
-# Utility functions
+        username = (AUTH_CONFIG.get("admin_username") or "admin").strip().lower()
+        password = AUTH_CONFIG.get("admin_password") or "admin"
+        with self.lock:
+            try:
+                with self._cursor() as cursor:
+                    cursor.execute("SELECT COUNT(*) FROM users")
+                    if cursor.fetchone()[0] > 0:
+                        return
+                    cursor.execute("SELECT id FROM roles WHERE name = %s", ("admin",))
+                    row = cursor.fetchone()
+                    if not row:
+                        logging.error("RBAC seed failed: admin role missing")
+                        return
+                    cursor.execute(
+                        """
+                        INSERT INTO users (username, password_hash, role_id, is_active)
+                        VALUES (%s, %s, %s, TRUE)
+                        """,
+                        (username, hash_password(password), row[0]),
+                    )
+                if password == "admin":
+                    logging.warning(
+                        "Seeded admin user %r with default password — "
+                        "set ADMIN_PASSWORD in .env",
+                        username,
+                    )
+                else:
+                    logging.info("Seeded admin user %r", username)
+            except Exception as e:
+                logging.error("Error seeding admin user: %s", e)
+
+    def _user_row(self, row, columns) -> dict:
+        record = _row_dict(columns, row)
+        record["is_active"] = bool(record.get("is_active"))
+        return record
+
+    def get_user_by_username(self, username: str) -> Optional[dict]:
+        username = (username or "").strip().lower()
+        if not username:
+            return None
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT u.id, u.username, u.password_hash, u.is_active, u.created_at,
+                       r.name AS role
+                FROM users u
+                JOIN roles r ON r.id = u.role_id
+                WHERE u.username = %s
+                """,
+                (username,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            columns = [desc[0] for desc in cursor.description]
+            return self._user_row(row, columns)
+
+    def get_user_by_id(self, user_id: int) -> Optional[dict]:
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT u.id, u.username, u.password_hash, u.is_active, u.created_at,
+                       r.name AS role
+                FROM users u
+                JOIN roles r ON r.id = u.role_id
+                WHERE u.id = %s
+                """,
+                (user_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            columns = [desc[0] for desc in cursor.description]
+            return self._user_row(row, columns)
+
+    def list_users(self) -> list:
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT u.id, u.username, u.is_active, u.created_at, r.name AS role
+                FROM users u
+                JOIN roles r ON r.id = u.role_id
+                ORDER BY u.id
+                """
+            )
+            columns = [desc[0] for desc in cursor.description]
+            return [self._user_row(row, columns) for row in cursor.fetchall()]
+
+    def count_admins(self, exclude_id: int = None) -> int:
+        with self._cursor() as cursor:
+            sql = """
+                SELECT COUNT(*) FROM users u
+                JOIN roles r ON r.id = u.role_id
+                WHERE r.name = 'admin' AND u.is_active = TRUE
+            """
+            params: list = []
+            if exclude_id is not None:
+                sql += " AND u.id != %s"
+                params.append(exclude_id)
+            cursor.execute(sql, params)
+            return cursor.fetchone()[0]
+
+    def create_user(self, username: str, password: str, role: str) -> Optional[dict]:
+        from auth import ROLES, hash_password
+
+        username = (username or "").strip().lower()
+        role = (role or "").strip().lower()
+        if not username or role not in ROLES:
+            return None
+        with self.lock:
+            try:
+                with self._cursor() as cursor:
+                    cursor.execute("SELECT id FROM roles WHERE name = %s", (role,))
+                    role_row = cursor.fetchone()
+                    if not role_row:
+                        return None
+                    cursor.execute(
+                        """
+                        INSERT INTO users (username, password_hash, role_id, is_active)
+                        VALUES (%s, %s, %s, TRUE)
+                        RETURNING id
+                        """,
+                        (username, hash_password(password), role_row[0]),
+                    )
+                    new_id = cursor.fetchone()[0]
+                return self.get_user_by_id(new_id)
+            except IntegrityError:
+                return None
+            except Exception as e:
+                logging.error("Error creating user: %s", e)
+                return None
+
+    def update_user(
+        self,
+        user_id: int,
+        *,
+        password: str = None,
+        role: str = None,
+        is_active: bool = None,
+    ) -> Optional[dict]:
+        from auth import ROLES, hash_password
+
+        existing = self.get_user_by_id(user_id)
+        if not existing:
+            return None
+        new_role = (role or existing["role"]).strip().lower()
+        if new_role not in ROLES:
+            return None
+        new_active = existing["is_active"] if is_active is None else bool(is_active)
+        with self.lock:
+            try:
+                with self._cursor() as cursor:
+                    cursor.execute("SELECT id FROM roles WHERE name = %s", (new_role,))
+                    role_row = cursor.fetchone()
+                    if not role_row:
+                        return None
+                    if password:
+                        cursor.execute(
+                            """
+                            UPDATE users
+                            SET password_hash = %s, role_id = %s, is_active = %s
+                            WHERE id = %s
+                            """,
+                            (hash_password(password), role_row[0], new_active, user_id),
+                        )
+                    else:
+                        cursor.execute(
+                            """
+                            UPDATE users SET role_id = %s, is_active = %s WHERE id = %s
+                            """,
+                            (role_row[0], new_active, user_id),
+                        )
+                return self.get_user_by_id(user_id)
+            except Exception as e:
+                logging.error("Error updating user %s: %s", user_id, e)
+                return None
+
+    def delete_user(self, user_id: int) -> bool:
+        existing = self.get_user_by_id(user_id)
+        if not existing:
+            return False
+        if existing["role"] == "admin" and self.count_admins(exclude_id=user_id) < 1:
+            return False
+        with self.lock:
+            try:
+                with self._cursor() as cursor:
+                    cursor.execute("DELETE FROM users WHERE id = %s", (user_id,))
+                    return cursor.rowcount > 0
+            except Exception as e:
+                logging.error("Error deleting user %s: %s", user_id, e)
+                return False
+
+
 def init_database() -> NewsDatabase:
-    """Initialize and return database instance"""
     return NewsDatabase()
 
+
 def create_indices():
-    """Create additional indices for better performance"""
-    db = NewsDatabase()
-    
-    with sqlite3.connect(db.db_path) as conn:
-        cursor = conn.cursor()
-        
-        # Additional indices for better search performance
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_text_content ON text_extractions(extracted_text)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_audio_content ON audio_transcriptions(transcribed_text)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_text_timestamp_region ON text_extractions(timestamp, region_name)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_alert_severity_read ON alerts(severity, is_read)")
-        
-        conn.commit()
-    
-    logging.info("Additional database indices created")
+    """Apply schema migrations (name kept for existing callers)."""
+    run_migrations()

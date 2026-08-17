@@ -2,6 +2,7 @@ import type {
   Alert,
   AppConfig,
   AudioTranscription,
+  AuthUser,
   MonitorStatusResponse,
   StatisticsResponse,
   TextExtraction,
@@ -35,6 +36,24 @@ export function getFlaskDirectBase(): string {
   return "http://127.0.0.1:5000";
 }
 
+export const TOKEN_KEY = "nm_token";
+
+export function getAuthToken(): string {
+  if (typeof window === "undefined") return "";
+  return localStorage.getItem(TOKEN_KEY) || "";
+}
+
+export function setAuthToken(token: string | null) {
+  if (typeof window === "undefined") return;
+  if (token) localStorage.setItem(TOKEN_KEY, token);
+  else localStorage.removeItem(TOKEN_KEY);
+}
+
+function authHeaders(): Record<string, string> {
+  const token = getAuthToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 /** NVR playback RTSP → browser MP4 stream URL (video + audio). */
 export function getTrackStreamUrl(params: {
   channel_id: string;
@@ -46,6 +65,8 @@ export function getTrackStreamUrl(params: {
     start: params.start,
     duration: String(params.duration),
   });
+  const token = getAuthToken();
+  if (token) q.set("token", token);
   return `${getFlaskDirectBase()}/api/tracks/stream?${q}`;
 }
 
@@ -63,6 +84,7 @@ async function request<T>(
       ...init,
       headers: {
         "Content-Type": "application/json",
+        ...authHeaders(),
         ...init?.headers,
       },
     });
@@ -78,6 +100,16 @@ async function request<T>(
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
+    if (
+      res.status === 401 &&
+      typeof window !== "undefined" &&
+      !path.startsWith("/api/auth/login")
+    ) {
+      setAuthToken(null);
+      if (!window.location.pathname.startsWith("/login")) {
+        window.location.href = "/login";
+      }
+    }
     const msg = (data as { error?: string; hint?: string }).error;
     const extra = (data as { hint?: string }).hint;
     if (res.status === 404) {
@@ -96,6 +128,37 @@ async function request<T>(
 }
 
 export const api = {
+  login: (username: string, password: string) =>
+    request<{ token: string; user: AuthUser }>("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    }),
+
+  me: () => request<{ user: AuthUser }>("/api/auth/me"),
+
+  logout: () =>
+    request<{ success: boolean }>("/api/auth/logout", { method: "POST" }),
+
+  listUsers: () => request<{ users: AuthUser[] }>("/api/users"),
+
+  createUser: (body: { username: string; password: string; role: string }) =>
+    request<{ user: AuthUser }>("/api/users", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  updateUser: (
+    id: number,
+    body: { password?: string; role?: string; is_active?: boolean }
+  ) =>
+    request<{ user: AuthUser }>(`/api/users/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+
+  deleteUser: (id: number) =>
+    request<{ success: boolean }>(`/api/users/${id}`, { method: "DELETE" }),
+
   getStatistics: () => request<StatisticsResponse>("/api/statistics"),
 
   getMonitorStatus: () =>
@@ -285,7 +348,10 @@ export const api = {
     const url = `${base}/api/config/channels/${encodeURIComponent(channelId)}/snapshot`;
     let res: Response;
     try {
-      res = await fetch(url, { cache: "no-store" });
+      res = await fetch(url, {
+        cache: "no-store",
+        headers: authHeaders(),
+      });
     } catch (err) {
       throw new Error(
         `Network error loading snapshot (${err instanceof Error ? err.message : "Failed to fetch"})`

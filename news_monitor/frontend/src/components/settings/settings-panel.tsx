@@ -10,8 +10,11 @@ import { AlertKeywordsCard } from "@/components/settings/alert-keywords-card";
 import { RtspChannelsCard } from "@/components/settings/rtsp-channels-card";
 import { Badge } from "@/components/ui/badge";
 import { siteConfig } from "@/config/site";
+import { UsersCard } from "@/components/settings/users-card";
+import { useAuth } from "@/components/auth/auth-provider";
 
 export function SettingsPanel() {
+  const { can } = useAuth();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [keywords, setKeywords] = useState<string[]>([]);
   const [newKeyword, setNewKeyword] = useState("");
@@ -241,82 +244,8 @@ export function SettingsPanel() {
           busy={keywordBusy}
           statusMessage={keywordStatus}
         />
-
-        <SectionCard
-          title="Text Regions"
-          icon={<Layers className="h-5 w-5 text-primary" />}
-          accent="purple"
-        >
-          <p className="mb-4 text-sm text-slate-500">
-            Default layout used when a channel has no custom boxes. Use{" "}
-            <span className="font-medium text-slate-700">Edit OCR regions</span>{" "}
-            on a live frame. FM audio channels skip OCR.
-          </p>
-          <div className="space-y-3">
-            {Object.entries(config.text_regions).map(([key, r]) => (
-              <div
-                key={key}
-                className="rounded-xl border border-slate-200 bg-white p-4"
-              >
-                <div className="flex items-start justify-between gap-4">
-                  <div className="min-w-0 flex-1">
-                    <strong className="text-sm font-semibold text-slate-900">
-                      {r.name}
-                    </strong>
-                    <p className="mt-1 font-sans text-xs text-slate-500">
-                      Key: <span className="font-mono">{key}</span> · Min
-                      confidence: {r.min_confidence}
-                    </p>
-                  </div>
-                  <Badge
-                    variant="outline"
-                    className="shrink-0 font-mono text-[10px] font-normal"
-                  >
-                    [{r.region.join(", ")}]
-                  </Badge>
-                </div>
-              </div>
-            ))}
-          </div>
-        </SectionCard>
-
-        <SectionCard
-          title="Processing & Web"
-          icon={<Settings2 className="h-5 w-5 text-primary" />}
-          accent="teal"
-        >
-          <dl className="divide-y divide-slate-100">
-            {[
-              ["Frame interval", `${config.processing.frame_interval}s`],
-              ["Batch size", String(config.processing.batch_size)],
-              ["Max queue", String(config.processing.max_queue_size)],
-              ["Speech model", String(config.speech.model)],
-              ["Results per page", String(config.web.results_per_page)],
-              ["Max search results", String(config.web.max_search_results)],
-              [
-                "Auto-start monitoring",
-                config.auto_start_monitoring ? "On" : "Off",
-              ],
-              [
-                "Frontend API",
-                siteConfig.api.baseUrl || "(proxied /api)",
-              ],
-            ].map(([label, value]) => (
-              <div
-                key={label}
-                className="flex items-center justify-between gap-6 py-3 first:pt-0"
-              >
-                <dt className="shrink-0 text-sm font-medium text-slate-600">
-                  {label}
-                </dt>
-                <dd className="text-end font-mono text-sm text-slate-800">
-                  {value}
-                </dd>
-              </div>
-            ))}
-          </dl>
-        </SectionCard>
       </div>
+      {can("users") && <UsersCard />}
     </div>
   );
 }

@@ -3,6 +3,7 @@ import { DM_Sans } from "next/font/google";
 import { Noto_Nastaliq_Urdu } from "next/font/google";
 import "./globals.css";
 import { siteConfig } from "@/config/site";
+import { AuthProvider } from "@/components/auth/auth-provider";
 
 const dmSans = DM_Sans({
   subsets: ["latin"],
@@ -31,7 +32,7 @@ export default function RootLayout({
       <body
         className={`${dmSans.variable} ${notoUrdu.variable} font-sans antialiased`}
       >
-        {children}
+        <AuthProvider>{children}</AuthProvider>
       </body>
     </html>
   );

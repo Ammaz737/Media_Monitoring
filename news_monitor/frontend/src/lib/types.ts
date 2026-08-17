@@ -1,3 +1,13 @@
+export type AuthRole = "admin" | "operator" | "viewer";
+
+export interface AuthUser {
+  id: number;
+  username: string;
+  role: AuthRole | string;
+  is_active: boolean;
+  permissions: string[];
+}
+
 export interface TextExtraction {
   uuid: string;
   timestamp: string;

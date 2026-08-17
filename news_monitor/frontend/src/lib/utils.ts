@@ -1,5 +1,6 @@
 import { type ClassValue, clsx } from "clsx";
 import { twMerge } from "tailwind-merge";
+import { getAuthToken } from "@/lib/api";
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -36,6 +37,13 @@ export function parseKeywords(raw: string | string[] | null | undefined): string
   }
 }
 
+function withAuthToken(url: string): string {
+  const token = getAuthToken();
+  if (!token) return url;
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}token=${encodeURIComponent(token)}`;
+}
+
 /** Build same-origin URL for a stored screenshot absolute/relative path. */
 export function screenshotUrl(
   path: string | null | undefined
@@ -44,7 +52,7 @@ export function screenshotUrl(
   const normalized = path.replace(/\\/g, "/");
   const filename = normalized.split("/").pop();
   if (!filename) return null;
-  return `/api/screenshots/${encodeURIComponent(filename)}`;
+  return withAuthToken(`/api/screenshots/${encodeURIComponent(filename)}`);
 }
 
 /** Build same-origin URL for a stored transcription WAV clip. */
@@ -55,5 +63,7 @@ export function transcriptionAudioUrl(
   const normalized = path.replace(/\\/g, "/");
   const filename = normalized.split("/").pop();
   if (!filename) return null;
-  return `/api/transcriptions/audio/${encodeURIComponent(filename)}`;
+  return withAuthToken(
+    `/api/transcriptions/audio/${encodeURIComponent(filename)}`
+  );
 }

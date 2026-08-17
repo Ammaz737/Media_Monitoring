@@ -20,6 +20,7 @@ interface SystemStatusProps {
   framesProcessed?: number;
   framesCaptured?: number;
   defaultStreamUrl?: string;
+  canOperate?: boolean;
   onStart: (rtspUrl: string, channelName: string) => void;
   onStop: () => void;
 }
@@ -34,6 +35,7 @@ export function SystemStatus({
   framesProcessed = 0,
   framesCaptured = 0,
   defaultStreamUrl,
+  canOperate = true,
   onStart,
   onStop,
 }: SystemStatusProps) {
@@ -168,6 +170,7 @@ export function SystemStatus({
         </div>
       </div>
 
+      {canOperate && (
       <div className="mt-auto grid gap-3">
         <button
           type="button"
@@ -198,6 +201,7 @@ export function SystemStatus({
           Stop Monitoring
         </button>
       </div>
+      )}
     </div>
   );
 }

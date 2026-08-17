@@ -13,6 +13,7 @@ import { api } from "@/lib/api";
 import { subscribeRealtime } from "@/lib/socket";
 import { siteConfig } from "@/config/site";
 import { useMonitor } from "@/hooks/use-monitor";
+import { useAuth } from "@/components/auth/auth-provider";
 import type {
   Alert,
   AudioTranscription,
@@ -24,6 +25,7 @@ import type {
 
 export default function DashboardPage() {
   const monitor = useMonitor();
+  const { can } = useAuth();
   const [connected, setConnected] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(true);
   const [dbStats, setDbStats] = useState<DatabaseStats | undefined>();
@@ -184,6 +186,7 @@ export default function DashboardPage() {
             framesProcessed={monStats?.frames_processed ?? 0}
             framesCaptured={monStats?.frames_captured ?? 0}
             defaultStreamUrl={configStreamUrl}
+            canOperate={can("operate")}
             onStart={handleStartMonitor}
             onStop={() => monitor.stop()}
           />
@@ -202,7 +205,7 @@ export default function DashboardPage() {
           transcriptions={transcriptions}
           alerts={alerts}
           loading={loading}
-          onMarkAlertRead={handleMarkRead}
+          onMarkAlertRead={can("operate") ? handleMarkRead : undefined}
         />
       </Suspense>
     </AppShell>

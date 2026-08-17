@@ -2499,56 +2499,7 @@ def api_ocr_results():
         page = int(request.args.get('page', 1))
         per_page = int(request.args.get('per_page', 50))
         
-        # Validate parameters
-        if page < 1:
-            page = 1
-        if per_page < 1 or per_page > 100:
-            per_page = 50
-        
-        # Get total count first
-        with db.lock:
-            import sqlite3
-            with sqlite3.connect(db.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT COUNT(*) FROM text_extractions")
-                total_count = cursor.fetchone()[0]
-        
-        # Calculate pagination
-        total_pages = (total_count + per_page - 1) // per_page
-        offset = (page - 1) * per_page
-        
-        # Get paginated results
-        with db.lock:
-            with sqlite3.connect(db.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT uuid, timestamp, region_name, extracted_text, confidence, 
-                           priority, screenshot_path, channel_name
-                    FROM text_extractions
-                    ORDER BY timestamp DESC
-                    LIMIT ? OFFSET ?
-                """, (per_page, offset))
-                
-                columns = ['uuid', 'timestamp', 'region_name', 'extracted_text', 
-                          'confidence', 'priority', 'screenshot_path', 'channel_name']
-                results = []
-                
-                for row in cursor.fetchall():
-                    record = dict(zip(columns, row))
-                    # Format timestamp if it's not already a string
-                    if isinstance(record['timestamp'], str):
-                        pass  # Already formatted
-                    else:
-                        record['timestamp'] = record['timestamp']
-                    results.append(record)
-        
-        return jsonify({
-            'results': results,
-            'page': page,
-            'per_page': per_page,
-            'total': total_count,
-            'total_pages': total_pages
-        })
+        return jsonify(db.paginate_text_extractions(page=page, per_page=per_page))
         
     except Exception as e:
         logging.error(f"Error in OCR results API: {e}")
@@ -2561,56 +2512,7 @@ def api_transcription_results():
         page = int(request.args.get('page', 1))
         per_page = int(request.args.get('per_page', 50))
         
-        # Validate parameters
-        if page < 1:
-            page = 1
-        if per_page < 1 or per_page > 100:
-            per_page = 50
-        
-        # Get total count first
-        with db.lock:
-            import sqlite3
-            with sqlite3.connect(db.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT COUNT(*) FROM audio_transcriptions")
-                total_count = cursor.fetchone()[0]
-        
-        # Calculate pagination
-        total_pages = (total_count + per_page - 1) // per_page
-        offset = (page - 1) * per_page
-        
-        # Get paginated results
-        with db.lock:
-            with sqlite3.connect(db.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT uuid, timestamp, transcribed_text, confidence, 
-                           duration, language, channel_name
-                    FROM audio_transcriptions
-                    ORDER BY timestamp DESC
-                    LIMIT ? OFFSET ?
-                """, (per_page, offset))
-                
-                columns = ['uuid', 'timestamp', 'transcribed_text', 'confidence',
-                          'duration', 'language', 'channel_name']
-                results = []
-                
-                for row in cursor.fetchall():
-                    record = dict(zip(columns, row))
-                    # Format timestamp if it's not already a string
-                    if isinstance(record['timestamp'], str):
-                        pass  # Already formatted
-                    else:
-                        record['timestamp'] = record['timestamp']
-                    results.append(record)
-        
-        return jsonify({
-            'results': results,
-            'page': page,
-            'per_page': per_page,
-            'total': total_count,
-            'total_pages': total_pages
-        })
+        return jsonify(db.paginate_audio_transcriptions(page=page, per_page=per_page))
         
     except Exception as e:
         logging.error(f"Error in transcription results API: {e}")

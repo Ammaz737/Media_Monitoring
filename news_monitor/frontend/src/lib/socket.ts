@@ -1,6 +1,7 @@
 "use client";
 
 import { io, Socket } from "socket.io-client";
+import { getAuthToken } from "@/lib/api";
 import { siteConfig } from "@/config/site";
 import type { RealtimeUpdate } from "@/lib/types";
 
@@ -17,9 +18,12 @@ function getSocketUrl(): string {
 
 export function getSocket(): Socket {
   if (!socket) {
+    const token = getAuthToken();
     socket = io(getSocketUrl(), {
       transports: ["websocket", "polling"],
       autoConnect: true,
+      auth: token ? { token } : undefined,
+      query: token ? { token } : undefined,
     });
   }
   return socket;

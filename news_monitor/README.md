@@ -16,7 +16,7 @@ A comprehensive TVeyes-like solution for monitoring Urdu news channels with real
 - **Duplicate Detection**: Smart filtering to avoid redundant content
 - **Multi-region Processing**: Separate processing for different screen regions
 - **Performance Optimization**: Efficient batch processing and caching
-- **Data Storage**: SQLite database with full-text search capabilities
+- **Data Storage**: PostgreSQL
 - **Export Capabilities**: Search and export extracted content
 - **Multi-channel Support**: Monitor multiple news channels simultaneously
 

@@ -10,10 +10,12 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { useAuth } from "@/components/auth/auth-provider";
 
 type Filter = "all" | "unread" | "read";
 
 export function AlertsPageContent() {
+  const { can } = useAuth();
   const [filter, setFilter] = useState<Filter>("all");
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [totals, setTotals] = useState({ total: 0, unread: 0, read: 0 });
@@ -124,6 +126,7 @@ export function AlertsPageContent() {
             </p>
           </div>
         </div>
+        {can("operate") && (
         <Button
           variant="outline"
           size="sm"
@@ -134,6 +137,7 @@ export function AlertsPageContent() {
           <CheckCheck className="h-4 w-4" />
           Mark All Read
         </Button>
+        )}
       </div>
 
       {/* Stats */}
@@ -241,7 +245,7 @@ export function AlertsPageContent() {
               <AlertCard
                 key={a.uuid}
                 item={a}
-                onMarkRead={!a.is_read ? markRead : undefined}
+                onMarkRead={can("operate") && !a.is_read ? markRead : undefined}
               />
             ))}
           </div>
